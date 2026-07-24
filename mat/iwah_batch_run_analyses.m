@@ -1,4 +1,4 @@
-%% iwah_analyse_batch_runs.m
+%% iwah_batch_run_analyses.m
 % Batch analysis + plotting for many optimiser runs saved as .mat (each containing H).
 %
 % Produces:
@@ -21,22 +21,38 @@
 %
 % NOTES:
 %  - Each .mat contains variable H (history struct).
-%  - Use integer iterations only for trajectory alignment (it = 0,1,2,...).
+%  - We use integer iterations only for trajectory alignment (it = 0,1,2,...).
 %    Shake records (it=0.5 etc) are ignored in trajectory plots.
 %  - “Condition” for CSV starts is the CSV filename stem (without extension).
 %    For random starts condition = "randomStart".
 %
+% REQUIREMENTS:
+%  - Repository structure is preserved so the script can add src/ to the path.
 %
+% Ravi: edit USER OPTIONS.
 
 clear; clc;
-saveFigures = 1;
-figDir = '../fig';
+
+%% ===================== PROJECT PATHS =====================
+% Resolve all repository paths from this script, not from the current
+% MATLAB working directory or a user-specific absolute path.
+scriptDir = fileparts(mfilename('fullpath'));
+projectDir = fileparts(scriptDir);
+runDir = fullfile(projectDir, 'data', 'runs');
+figDir = fullfile(projectDir, 'fig');
+resultDir = fullfile(projectDir, 'results');
+addpath(fullfile(projectDir, 'src'));
+
+if ~isfolder(figDir), mkdir(figDir); end
+if ~isfolder(resultDir), mkdir(resultDir); end
+
+saveFigures = 0;
 %% ===================== USER OPTIONS =====================
-RUN_DIR = "../data/runs";                      % folder containing run .mat files
+RUN_DIR = runDir;                      % folder containing run .mat files
 FILE_GLOB = "*.mat";                   % match pattern
 
 AFTER_MODE = "final";                  % "final" | "best" (best = max pass tie-break by p95/J)
-METRIC = "pos";                        % "pos" (cm) | "ang" (deg)
+METRIC = "ang";                        % "pos" (cm) | "ang" (deg)
 IGNORE_UNUSED = true;                  % use stats.usedMask
 
 % Thresholding for “before/after distributions”
@@ -44,6 +60,13 @@ HIST = struct();
 HIST.nBins = 45;                       % histogram bin count
 HIST.capMode = "4xThreshold";          % "4xThreshold" | "2xThreshold" | "none"
 HIST.showCatastrophicText = true;
+HIST.alphaBefore = 0.55;               % stronger pre-optimisation fill
+HIST.alphaAfter  = 0.60;               % stronger post-optimisation fill
+HIST.gridAlpha   = 0.10;               % keep grid subordinate to distributions
+HIST.cPyrBefore = [0.35 0.35 0.35];   % grey
+HIST.cPyrAfter  = [0.05 0.38 0.78];   % blue
+HIST.cTetAfter  = [0.90 0.32 0.04];   % orange
+HIST.cTetBefore = (1-0.42)*HIST.cTetAfter + 0.42*[1 1 1]; % light orange
 
 % Pass-% trajectory summary band
 TRAJ = struct();
@@ -56,8 +79,12 @@ RAD = struct();
 RAD.nRBins = 10;                       % radial bins for summary curves (centres)
 RAD.qLo = 10;
 RAD.qHi = 90;
-RAD.scatterAlphaBefore = 0.12;
-RAD.scatterAlphaAfter  = 0.18;
+RAD.scatterAlphaBefore = 0.25;
+RAD.scatterAlphaAfter  = 0.32;
+RAD.beforeLineWidth = 2.4;
+RAD.afterLineWidth  = 2.4;
+RAD.thresholdLineWidth = 2.0;
+RAD.gridAlpha = 0.10;
 RAD.capForScatter = "2xThreshold";     % "2xThreshold" | "4xThreshold" | "none"
 
 % Figure layout
@@ -86,7 +113,7 @@ COND_LABELS = containers.Map( ...
     ] ...
     );
 
-% ---------- figure sizing (max width ~1200 px) ----------
+% ---------- A4-friendly figure sizing (max width ~1200 px) ----------
 FIG = struct();
 FIG.maxW = 1200;
 FIG.h1   = 650;    % fig1 height
@@ -240,9 +267,7 @@ for col = 1:numel(Ns)
         subtitle(ax, escapeLatex(cfg), 'Interpreter','latex');
     end
     ylim([10 100]); xlim([0 25]);
-    if col ~= 1
-        ylabel('');
-    end
+    ylabel('');
     xlabel(''); % no xlable for top row
 
     ax = nexttile(t1, numel(Ns) + col);
@@ -250,30 +275,29 @@ for col = 1:numel(Ns)
     ylim([0 100]); xlim([0 25]);
     title(ax, sprintf('$N_{mic}=%d$', N), 'Interpreter','latex');
     subtitle(ax, 'Random starts', 'Interpreter','latex');
-    if col~= 1
-        ylabel('');
-    end
+    ylabel('');
     if col ~= 3
         xlabel('');
     end
 end
 
+ylabel(t1, 'Pass rate (\%)', 'Interpreter','latex');
+
 if saveFigures && METRIC ~= "pos"
     figName = 'pass_trajectories.pdf';
    exportgraphics(gcf, fullfile(figDir, figName), 'Resolution', 300) 
+   disp("pass-rate trajecotries fig saved")
 end
 %% ===================== FIGURE 2: “AVERAGE RUN” HISTOGRAMS BEFORE vs AFTER =====================
+HIST.alphaBefore = 0.75;               % stronger pre-optimisation fill
+HIST.alphaAfter  = 0.80;  
+
 fig2 = figure('Name','Figure 2 — Average run histograms (Before vs After)','Color',[1 1 1], ...
     'Position',[80 80 min(FIG.maxW,1200) FIG.h23-100]);
 
 t2 = tiledlayout(fig2, 2, numel(Ns), 'Padding','compact', 'TileSpacing','tight');
 title(t2, sprintf('\\textbf{Average-run %s distributions: Pre vs. Post Optimisation}', ...
-    escapeLatex(pickMetricName(METRIC))), 'Interpreter','latex', 'FontSize', 16, 'FontWeight', 'bold', 'Interpreter','latex');
-
-% Choose global styling colours (consistent across all panels)
-COLH = struct();
-COLH.before = [0.60 0.60 0.60];   % grey fill
-COLH.after  = [0.10 0.50 0.90];   % blue fill
+    escapeLatex(pickMetricName(METRIC))), 'Interpreter','latex', 'FontSize', 14, 'FontWeight', 'bold', 'Interpreter','latex');
 
 % One xlabel only on row 2, col 3 (i.e., Ns(3) = 8 if Ns=[4 6 8 10 12])
 xlCol = 3;
@@ -295,16 +319,14 @@ for col = 1:numel(Ns)
     if METRIC == "pos"
         ylim([0 0.25]);
     else
-        ylim([0 0.5]);
+        % ylim([0 0.5]);
     end
     if METRIC == "ang"
         xlim([0 15]);
-        ylim([0 0.8])
+        % ylim([0 0.8])
     end
 
-    if col ~= 1
-        ylabel(ax, '');
-    end
+    ylabel(ax, '');
     xlabel(ax,'');
     axis(ax,'square');
 
@@ -314,14 +336,12 @@ for col = 1:numel(Ns)
     if METRIC == "pos"
         ylim([0 0.25]);
     else
-        ylim([0 0.5]);
+        % ylim([0 0.5]);
     end
     title(ax, sprintf('$N_{mic}=%d$', N), 'Interpreter','latex');
     subtitle(ax, 'Random starts', 'Interpreter','latex');
 
-    if col ~= 1
-        ylabel(ax, '');
-    end
+    ylabel(ax, '');
 
     if col == xlCol
         xlabel(ax, pickMetricName(METRIC), 'Interpreter','latex');
@@ -331,10 +351,12 @@ for col = 1:numel(Ns)
 
     if METRIC == "ang"
         xlim([0 15]);
-        ylim([0 0.8])
+        % ylim([0 0.8])
     end
     axis(ax,'square');
 end
+
+ylabel(t2, 'Mean probability (across runs)', 'Interpreter','latex');
 
 if saveFigures
     figName = strcat(['histograms_' char(METRIC) '_error.pdf']);
@@ -342,6 +364,9 @@ if saveFigures
 end
 
 %% ===================== FIGURE 3: ACCURACY vs DISTANCE FROM CENTRE =====================
+HIST.alphaBefore = 0.55;               % stronger pre-optimisation fill
+HIST.alphaAfter  = 0.60;  
+
 fig3 = figure('Name','Figure 3 — Accuracy vs distance from centre', ...
     'Color',[1 1 1], 'Position',[90 90 min(FIG.maxW,1200) FIG.h23-100]);
 
@@ -350,7 +375,7 @@ t3 = tiledlayout(fig3, 2, numel(Ns), ...
 
 title(t3, sprintf('\\textbf{%s vs distance from array centre (median + %d--%d\\%% band)}', ...
     escapeLatex(pickMetricName(METRIC)), RAD.qLo, RAD.qHi), ...
-    'Interpreter','latex', 'FontSize', 16, 'FontWeight', 'bold', 'Interpreter','latex');
+    'Interpreter','latex', 'FontSize', 14, 'FontWeight', 'bold', 'Interpreter','latex');
 
 % Column where we place the single x-label (middle column)
 xlCol = ceil(numel(Ns)/2);
@@ -360,7 +385,7 @@ for col = 1:numel(Ns)
 
     % -------- TOP ROW: CSV --------
     ax = nexttile(t3, col);
-    plotRadialAccuracy(ax, Runs, N, "csv", METRIC, RAD);
+    plotRadialAccuracy(ax, Runs, N, "csv", METRIC, RAD, HIST);
     title(ax, sprintf('$N_{mic}=%d$', N), 'Interpreter','latex');
     cfg = configLabelForN(Runs, N, "csv");
     if strlength(cfg) > 0
@@ -369,38 +394,28 @@ for col = 1:numel(Ns)
 
     axis(ax,'square');
     if METRIC == "pos"
-        ylim([0 35]);
+        % ylim([0 35]);
     elseif METRIC == "ang"
-        ylim([0 15]);
+        % ylim([0 10]);
     end
 
-    % Y-label only on first column
-    if col == 1
-        ylabel(ax, pickMetricName(METRIC), 'Interpreter','latex');
-    else
-        ylabel(ax,'');
-    end
+    ylabel(ax,'');
 
     xlabel(ax,'');  % no x-label in top row
 
     % -------- BOTTOM ROW: RANDOM --------
     ax = nexttile(t3, numel(Ns) + col);
-    plotRadialAccuracy(ax, Runs, N, "random", METRIC, RAD);
+    plotRadialAccuracy(ax, Runs, N, "random", METRIC, RAD, HIST);
     title(ax, sprintf('$N_{mic}=%d$', N), 'Interpreter','latex');
     subtitle(ax, 'Random starts', 'Interpreter','latex');
     axis(ax,'square');
     if METRIC == "pos"
-        ylim([0 35]);
+        % ylim([0 35]);
     elseif METRIC == "ang"
-        ylim([0 15]);
+        % ylim([0 10]);
     end
 
-    % Y-label only on first column
-    if col == 1
-        ylabel(ax, pickMetricName(METRIC), 'Interpreter','latex');
-    else
-        ylabel(ax,'');
-    end
+    ylabel(ax,'');
 
     % Single shared x-label
     if col == xlCol
@@ -410,13 +425,15 @@ for col = 1:numel(Ns)
     end
 end
 
+ylabel(t3, pickMetricName(METRIC), 'Interpreter','latex');
+
 if saveFigures
     figName = strcat(['accuracy_' char(METRIC) '_distance.pdf']);
    exportgraphics(gcf, fullfile(figDir, figName), 'Resolution', 300) 
 end
 
 %% ========================================================================
-%% Single-geometry BEFORE vs AFTER
+%% Single-geometry BEFORE vs AFTER (Figure-4 style, but only one geometry)
 %% ========================================================================
 
 % -------------------- USER SELECT --------------------
@@ -502,19 +519,21 @@ plot3D(ax1, P, run.base.M, gridPts, valsBase, maskBase, labelStr, thr, cmax, cat
 title(ax1, sprintf('Start Config: pass=%.1f\\%%', 100*run.passBase), 'Interpreter','latex');
 xlim(ax1, [-0.5 2]); ylim(ax1, [-2 2]); zlim(ax1, [-0.5 2]);
 colorbar off;
-
+formatLatex(gca);
+grid minor
 % -------- AFTER --------
 ax2 = nexttile(t, 2);
 plot3D(ax2, P, run.aft.M, gridPts, valsAft, maskAft, labelStr, thr, cmax, catThr);
 title(ax2, sprintf('Post-optimisation: pass=%.1f\\%%', 100*run.passAfter), 'Interpreter','latex');
 xlim(ax2, [-0.5 2]); ylim(ax2, [-2 2]); zlim(ax2, [-0.5 2]);
-
+formatLatex(gca);
+grid minor
 % Optional: consistent viewpoint
 view(ax1, 3);
 view(ax2, 3);
 
 % Optional: add a small subtitle with thresholds (safe interpreter)
-sgtitle('\textbf{Optimisation Run - Demonstration}', 'FontSize', 18, ...
+sgtitle('\textbf{Optimisation Run - Demonstration}', 'FontSize', 14, ...
     'FontWeight','bold', 'Interpreter', 'latex');
 
 if saveFigures && METRIC == "pos"
@@ -601,10 +620,10 @@ T = sortrows(T, {'startType','N','condition'});
 disp(T);
 saveCSV = 1;
 if saveCSV
-    writetable(T, ['../results/summary_stats_' char(METRIC) '.csv'])
+    writetable(T, fullfile(resultDir, ['summary_stats_' char(METRIC) '.csv']))
 end
 %% ===================== DELTA MOSAIC (BEFORE→AFTER) =====================
-% Robust colour scaling (95th percentile of delta), symmetric about 0.
+% Robust colour scaling (95th percentile of |Δ|), symmetric about 0.
 % Uses SHORT condition names everywhere.
 % Standard geometry map (CSV condition stem -> (configID, shortName))
 % NOTE: fix spelling to match your actual stems.
@@ -635,8 +654,9 @@ rwo_ids = [STD_IDS RAND_IDS];
 MOSAIC = struct();
 MOSAIC.capMult    = 4;
 MOSAIC.showTail   = true;
-MOSAIC.fontSize   = 13;
+MOSAIC.fontSize   = 12;
 MOSAIC.robustPct  = 95;
+MOSAIC.pdfSizeIn  = [6 4.5]; % fixed page size keeps POS and ANG PDFs identical
 
 useCap = (string(METRIC) == "pos");
 
@@ -718,7 +738,12 @@ grid off
 saveFigures = 1;
 if saveFigures
     figName = strcat([char(METRIC) '_improvements.pdf']);
-   exportgraphics(gcf, fullfile(figDir, figName), 'Resolution', 300) 
+    set(figM, ...
+        'PaperUnits','inches', ...
+        'PaperSize',MOSAIC.pdfSizeIn, ...
+        'PaperPosition',[0 0 MOSAIC.pdfSizeIn], ...
+        'PaperPositionMode','manual');
+    print(figM, fullfile(figDir, figName), '-dpdf', '-painters');
 end
 saveFigures = 0;
 %% ========================================================================
@@ -837,8 +862,16 @@ if isempty(R)
     return;
 end
 
-% Use SHORT labels for grouping
-conds = unique([R.condShort], 'stable');  % stable ordering
+% Use SHORT labels for grouping. Keep the two four-microphone canonical
+% geometries in a fixed order so their colours and annotations cannot
+% change with file-loading order.
+conds = unique([R.condShort], 'stable');
+isFourMicCanonical = N == 4 && string(startType) == "csv";
+if isFourMicCanonical
+    preferredOrder = ["Pyramid", "Tetrahedron"];
+    preferredOrder = preferredOrder(ismember(preferredOrder, conds));
+    conds = [preferredOrder, conds(~ismember(conds, preferredOrder))];
+end
 cols  = lines(max(1,numel(conds)));
 
 maxIt = max(arrayfun(@(r) max(r.itInt), R));
@@ -877,6 +910,34 @@ for c = 1:numel(conds)
     % Line (this is what legend should label)
     hLine(c) = plot(ax, x, med, 'LineWidth', TRAJ.lineWidth, 'Color', cols(c,:));
 
+end
+
+% Explicit in-panel colour key requested during peer review. Text is placed
+% in normalised axes coordinates so it remains stable if limits change.
+if isFourMicCanonical
+    pyramidIdx = find(conds == "Pyramid", 1);
+    tetrahedronIdx = find(conds == "Tetrahedron", 1);
+
+    if ~isempty(pyramidIdx)
+        text(ax, 0.57, 0.18, '-- Pyramid', ...
+            'Units', 'normalized', ...
+            'Color', cols(pyramidIdx, :), ...
+            'Interpreter', 'none', ...
+            'FontWeight', 'bold', ...
+            'FontSize', 9, ...
+            'HorizontalAlignment', 'left', ...
+            'VerticalAlignment', 'middle');
+    end
+    if ~isempty(tetrahedronIdx)
+        text(ax, 0.57, 0.08, '-- Tetrahedron', ...
+            'Units', 'normalized', ...
+            'Color', cols(tetrahedronIdx, :), ...
+            'Interpreter', 'none', ...
+            'FontWeight', 'bold', ...
+            'FontSize', 9, ...
+            'HorizontalAlignment', 'left', ...
+            'VerticalAlignment', 'middle');
+    end
 end
 
 xlabel(ax,'Iteration', 'Interpreter','latex');
@@ -918,7 +979,11 @@ function plotAverageHistogram(ax, Runs, N, startType, METRIC, HIST)
 % Filled "average-run" histograms (mean probability across runs).
 % Special case: N=4 & CSV -> Pyramid (grey/blue) + Tetrahedron (light-orange/orange).
 
+HIST = ensureHistogramStyle(HIST);
+
 grid(ax,'on'); hold(ax,'on');
+ax.GridAlpha = HIST.gridAlpha;
+ax.MinorGridAlpha = 0.5 * HIST.gridAlpha;
 
 sel = arrayfun(@(r) r.N==N && r.startType==startType, Runs);
 R = Runs(sel);
@@ -956,14 +1021,13 @@ edges = linspace(0, vMax, HIST.nBins+1);
 centres = (edges(1:end-1)+edges(2:end))/2;
 
 % ----- Colours -----
-cPyr_before = [0.60 0.60 0.60];      % grey
-cPyr_after  = [0.10 0.50 0.90];      % blue
+cPyr_before = HIST.cPyrBefore;
+cPyr_after  = HIST.cPyrAfter;
+cTet_before = HIST.cTetBefore;
+cTet_after  = HIST.cTetAfter;
 
-cTet_after  = [0.95 0.45 0.10];      % orange
-cTet_before = (1-0.55)*cTet_after + 0.55*[1 1 1]; % lighter orange
-
-alphaBefore = 0.28;
-alphaAfter  = 0.28;
+alphaBefore = HIST.alphaBefore;
+alphaAfter  = HIST.alphaAfter;
 
 % ----- Draw -----
 if string(startType)=="csv" && N==4
@@ -1001,7 +1065,7 @@ else
 end
 
 % Threshold line
-xline(ax, thr, '--k', 'threshold');
+xline(ax, thr, '--k', 'thr');
 
 % Labels (you will blank these at the layout level as needed)
 xlabel(ax, pickMetricName(METRIC), 'Interpreter','latex');
@@ -1021,6 +1085,21 @@ if isfield(HIST,'showCatastrophicText') && HIST.showCatastrophicText && isfinite
 
     fracB = nCatB / max(1,nTotB);
     fracA = nCatA / max(1,nTotA);
+
+    % txt = sprintf(['Catastrophic ($>$ cap)\n' ...
+    %                'before: %.1f\\%% (%d/%d)\n' ...
+    %                'after:  %.1f\\%% (%d/%d)'], ...
+    %                100*fracB, nCatB, nTotB, ...
+    %                100*fracA, nCatA, nTotA);
+    %
+    % text(ax, 0.98, 0.98, txt, ...
+    %     'Units','normalized', ...
+    %     'HorizontalAlignment','right', ...
+    %     'VerticalAlignment','top', ...
+    %     'FontSize',9, ...
+    %     'Interpreter','latex', ...
+    %     'BackgroundColor',[1 1 1 0.85], ...
+    %     'EdgeColor',[0.75 0.75 0.75]);
 end
 
 formatLatex(ax);
@@ -1129,8 +1208,12 @@ else
 end
 end
 
-function plotRadialAccuracy(ax, Runs, N, startType, METRIC, RAD)
+function plotRadialAccuracy(ax, Runs, N, startType, METRIC, RAD, HIST)
+HIST = ensureHistogramStyle(HIST);
+
 grid(ax,'on'); hold(ax,'on');
+ax.GridAlpha = RAD.gridAlpha;
+ax.MinorGridAlpha = 0.5 * RAD.gridAlpha;
 
 sel = arrayfun(@(r) r.N==N && r.startType==startType, Runs);
 R = Runs(sel);
@@ -1161,9 +1244,6 @@ rAll = rAll(isfinite(rAll));
 rbins = linspace(min(rAll), max(rAll), RAD.nRBins+1);
 rcent = (rbins(1:end-1) + rbins(2:end)) / 2;
 nBins = numel(rcent);
-
-cols = lines(max(1,numel(conds)));
-lighten = @(c,a) (1-a)*c + a*[1 1 1];
 
 for ic = 1:numel(conds)
     condS = conds(ic);
@@ -1214,25 +1294,59 @@ for ic = 1:numel(conds)
     mB = median(medB,2,'omitnan'); lB = median(loB,2,'omitnan'); hB = median(hiB,2,'omitnan');
     mA = median(medA,2,'omitnan'); lA = median(loA,2,'omitnan'); hA = median(hiA,2,'omitnan');
 
-    c = cols(ic,:);
-    cBefore = lighten(c, 0.55);
-    cAfter  = c;
+    if string(startType) == "csv" && N == 4 && ...
+            (condS == "Tetrahedron" || contains(lower(condS), "tetra"))
+        cBefore = HIST.cTetBefore;
+        cAfter  = HIST.cTetAfter;
+    else
+        cBefore = HIST.cPyrBefore;
+        cAfter  = HIST.cPyrAfter;
+    end
 
-    fillBand(ax, rcent, lB, hB, cBefore, 0.16);
-    fillBand(ax, rcent, lA, hA, cAfter,  0.18);
+    fillBand(ax, rcent, lB, hB, cBefore, HIST.alphaBefore);
+    fillBand(ax, rcent, lA, hA, cAfter,  HIST.alphaAfter);
 
-    plot(ax, rcent, mB, '--', 'Color', cBefore, 'LineWidth', 1.8);
-    plot(ax, rcent, mA, '-',  'Color', cAfter,  'LineWidth', 2.2);
+    plot(ax, rcent, mB, '--', 'Color', cBefore, 'LineWidth', RAD.beforeLineWidth);
+    plot(ax, rcent, mA, '-',  'Color', cAfter,  'LineWidth', RAD.afterLineWidth);
 end
 
-yline(ax, thr, '--k', 'thr');
-
+if METRIC == 'pos'
+    yline(ax, thr, '--k', 'thr', 'LineWidth', RAD.thresholdLineWidth);
+end
 xlabel(ax,'Distance from array centre (m)','Interpreter','latex');
 ylabel(ax, pickMetricName(METRIC), 'Interpreter','latex');
 xlim(ax, [rbins(1) rbins(end)]);
 
+% if string(startType) == "csv"
+%     L = strings(0);
+%     for ic = 1:numel(conds)
+%         L(end+1) = conds(ic) + " BEFORE"; %#ok<AGROW>
+%         L(end+1) = conds(ic) + " AFTER";  %#ok<AGROW>
+%     end
+%     L(end+1) = "thr";
+%     legend(ax, cellstr(L), 'Interpreter','latex', 'Location','best');
+% else
+%     legend(ax, ...
+%         {sprintf('before %d--%d\\%% band', RAD.qLo, RAD.qHi), sprintf('after %d--%d\\%% band', RAD.qLo, RAD.qHi), ...
+%          'before median','after median','thr'}, ...
+%         'Interpreter','latex', 'Location','best');
+% end
+
 formatLatex(ax);
 hold(ax,'off');
+end
+
+function HIST = ensureHistogramStyle(HIST)
+% Supply shared defaults when a plotting section is run with an older
+% HIST structure retained in the MATLAB workspace.
+if ~isfield(HIST,'alphaBefore'), HIST.alphaBefore = 0.75; end
+if ~isfield(HIST,'alphaAfter'),  HIST.alphaAfter  = 0.80; end
+if ~isfield(HIST,'cPyrBefore'),  HIST.cPyrBefore  = [0.35 0.35 0.35]; end
+if ~isfield(HIST,'cPyrAfter'),   HIST.cPyrAfter   = [0.05 0.38 0.78]; end
+if ~isfield(HIST,'cTetAfter'),   HIST.cTetAfter   = [0.90 0.32 0.04]; end
+if ~isfield(HIST,'cTetBefore')
+    HIST.cTetBefore = (1-0.42)*HIST.cTetAfter + 0.42*[1 1 1];
+end
 end
 
 function [med, qlo, qhi] = radialQuantiles(r, e, rbins, qLo, qHi)

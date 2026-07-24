@@ -1,27 +1,33 @@
 # **WAH-*i* App — Installation**
 
-This folder contains standalone installers for the **WAH-i (Widefield Acoustics Heuristic – inverse iterative design)** MATLAB GUI.
+This folder contains standalone installers for the **WAH-*i*** (Widefield
+Acoustics Heuristic -- inverse, iterative) MATLAB GUI.
 
 ## **Folder structure**
 
 ```
 app_install/
-├── winx64/   → Windows 64-bit installer
-└── mac/      → macOS installer
+├── winx64/wahi_gui_web.exe.zip   → Windows 64-bit web installer
+└── mac/wahi_gui_web.zip          → macOS web installer
 ```
 
 ## **Installation notes**
 
-- The application is distributed as a **standalone MATLAB app**.
+- The application is distributed as a **standalone compiled MATLAB app**.
 - **MATLAB Runtime (MCR)** is required to run the app.
-- If MATLAB Runtime is **not already installed**, the installer will **automatically download and install** the appropriate version during setup.
+- These are web installers. If MATLAB Runtime is **not already installed**, an
+  internet connection is required so the installer can download the compatible
+  runtime during setup.
 - No full MATLAB licence is required to run the installed application.
 - For the app to look its best, [install the Lato font](https://fonts.google.com/specimen/Lato) on your computer. 
 
 ## **Platform notes**
 
-- **Windows:** Run the installer from winx64/ and follow the on-screen instructions.
-- **macOS:** Run the installer from mac/. You may need to approve the app in *System Settings → Privacy & Security* on first launch.
+- **Windows:** Extract `winx64/wahi_gui_web.exe.zip`, run
+  `wahi_gui_web.exe`, and follow the on-screen instructions.
+- **macOS:** Extract `mac/wahi_gui_web.zip`, open `wahi_gui_web.app`, and
+  follow the installer. You may need to approve it in *System Settings →
+  Privacy & Security* on first launch.
 
 ## Installed Apps
 
@@ -35,13 +41,15 @@ app_install/
 
 ## Reports
 
-You may see the report of the run by clicking the `Report` button. A typical report looks like:
+View a run summary by clicking **Report**. A typical report looks like:
 
 ![iwah_gui_run__4mics__20260203_100305](../reports/iwah_gui_run__4mics__20260203_100305.png)
 
 ## Export Run
 
-You may save the run history using the *Export Run* button, which saves the data in `.mat` file. Use `mat/iwah_singleRun_analyses.m` as a starting point for detailed analyses and possibly build your own pipeline. 
+Use **Export Run** to save the complete run history as a MAT file. The
+`mat/iwah_singleRun_analyses.m` script provides a starting point for detailed
+analysis and custom downstream pipelines.
 
 ## Flexibility
 

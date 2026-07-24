@@ -1,7 +1,7 @@
 %% iwah_geometry_drift_plots_etc.m
-% boxplots: optimisation-induced geometry drift (after - before).
+% Geometry-drift boxplots, optimisation diagnostics, compactness, and scaling analyses.
 % X-axis uses short config IDs; a legend panel maps IDs -> names.
-% Uses different colour per dimension (delta - x/y/z).
+% Uses different colour per dimension (Δx/Δy/Δz).
 %
 % Requirements:
 %   - RUN_DIR contains .mat files with variable H (history struct)
@@ -10,10 +10,23 @@
 %   - CSV vs random inferred via H.meta.start.csvPath / meta.start.source
 %
 clear; clc;
+
+%% ---------------- PROJECT PATHS ----------------
+% Resolve repository paths from this script so execution is independent of
+% the current MATLAB working directory and user account.
+scriptDir = fileparts(mfilename('fullpath'));
+projectDir = fileparts(scriptDir);
+runDir = fullfile(projectDir, 'data', 'runs');
+figDir = fullfile(projectDir, 'fig');
+resultDir = fullfile(projectDir, 'results');
+addpath(fullfile(projectDir, 'src'));
+
+if ~isfolder(figDir), mkdir(figDir); end
+if ~isfolder(resultDir), mkdir(resultDir); end
+
 saveFigures = 0;
-figDir = '../fig';
 %% ---------------- USER OPTIONS ----------------
-RUN_DIR   = "../data/runs";
+RUN_DIR   = runDir;
 FILE_GLOB = "*.mat";
 AFTER_MODE = "final";  % "final" | "best"
 A4_MAX_W   = 1200;
@@ -22,9 +35,9 @@ A4_MAX_W   = 1200;
 % NOTE: fix spelling to match your actual stems.
 STD_KEYS  = [ ...
     "4mics_Pyramid", ...
-    "4mics_Tetrahedron", ...
+    "4mics_Tetrahedron_small", ...
     "6mics_Octahedron", ...
-    "8mics_double_tetrahedorn", ...  
+    "8mics_double_tetrahedorn_small", ...
     "10mics_pentagonal_antiprism", ...
     "12mics_icosahedron" ...
 ];
@@ -45,8 +58,8 @@ RAND_NAMES = "Random (" + string(RAND_NS) + ")";
 
 % Visual style
 STYLE = struct();
-STYLE.axisFS = 12;
-STYLE.titleFS = 18;
+STYLE.axisFS = 10;
+STYLE.titleFS = 14;
 
 % boxplot appearance
 BOX = struct();
@@ -169,16 +182,15 @@ g = categorical(grp, allIDs, string(allIDs), 'Ordinal', true);
 
 %% ---------------- FIGURE: 3 BOXPLOTS + TEXTBOX LEGEND BELOW ----------------
 fig = figure('Name','Geometry drift boxplots (after - before)', ...
-    'Color',[1 1 1], 'Position',[80 80 950 430]);
+    'Color',[1 1 1], 'Position',[80 80 980 430]);
 
-t = tiledlayout(fig, 1, 3, 'Padding','compact', 'TileSpacing','compact');
+t = tiledlayout(fig, 1, 3, 'Padding','loose', 'TileSpacing','compact');
 
 % Reserve bottom strip for legend textbox (no extra height)
 t.Units = 'normalized';
-t.Position = [0.04 0.20 0.94 0.76];   % [left bottom width height] -> bottom 20% reserved
+t.Position = [0.06 0.20 0.93 0.75];   % [left bottom width height] -> bottom 20% reserved
 
-subtitle(t, sprintf('$\\Delta$ mic coordinates across optimisation runs'), ...
-    'Interpreter','latex', 'FontSize', STYLE.titleFS);
+
 
 % Δx
 ax1 = nexttile(t, 1);
@@ -232,12 +244,15 @@ annotation(fig, 'textbox', [0.04 0.02 0.94 0.11], ...
     'Margin', 6, ...
     'VerticalAlignment','top', ...
     'HorizontalAlignment','center', ...
-    'FitBoxToText','on', 'FontSize', 14);
+    'FitBoxToText','on', 'FontSize', 10);
 
 % Formatting
 if exist('formatLatex','file')==2
     formatLatex(ax1); formatLatex(ax2); formatLatex(ax3);
 end
+
+title(t, sprintf('Shift in mic. coordinates across optimisation runs'), ...
+    'Interpreter','latex', 'FontSize', STYLE.titleFS, 'FontWeight', 'bold');
 
 if saveFigures
     figName = 'geometry_drifts.pdf';
@@ -349,6 +364,7 @@ for i = 1:nR
 end
 
 % Attach cfg IDs (already computed later, but we can compute now too)
+% If cfgID exists later, you can comment this block.
 cfgID_diag = nan(nR,1);
 for i = 1:nR
     if R(i).startType == "csv"
@@ -423,10 +439,10 @@ ax = nexttile(td,1);
 boxchart(ax, gID, passMax);
 grid(ax,'on');
 ylabel(ax,'Max pass rate (\%)','Interpreter','latex');
-% xlabel(ax,'Configuration ID','Interpreter','latex'); % <-- removed for
-% polished look
+% xlabel(ax,'Configuration ID','Interpreter','latex');
 title(ax,'Achievable max pass','Interpreter','latex');
 axis(ax,'square');
+box 'on';
 
 % (2) Final pass
 ax = nexttile(td,2);
@@ -436,6 +452,7 @@ ylabel(ax,'Final pass rate (\%)','Interpreter','latex');
 xlabel(ax,'Configuration ID','Interpreter','latex');
 title(ax,'Final pass','Interpreter','latex');
 axis(ax,'square');
+box 'on';
 
 % (3) Convergence iteration
 ax = nexttile(td,3);
@@ -445,6 +462,7 @@ ylabel(ax,'Convergence iteration','Interpreter','latex');
 % xlabel(ax,'Configuration ID','Interpreter','latex');
 title(ax, sprintf('Convergence at %.0f\\%% of run max',100*DIAG.convFrac), 'Interpreter','latex');
 axis(ax,'square');
+box 'on';
 
 if exist('formatLatex','file')==2
     formatLatex(nexttile(td,1)); formatLatex(nexttile(td,2)); formatLatex(nexttile(td,3));
@@ -474,9 +492,9 @@ COMPACT = struct();
 COMPACT.units = "m";     % keep as metres; convert later if you prefer cm
 COMPACT.printTable = true;
 COMPACT.exportCSV  = true;
-COMPACT.csvPath    = fullfile("../results/geometry_compactness_bbox.csv");
+COMPACT.csvPath    = fullfile(resultDir, 'geometry_compactness_bbox.csv');
 COMPACT.exportLatex = true;
-COMPACT.latexPath   = fullfile("../results/geometry_compactness_bbox.tex");
+COMPACT.latexPath   = fullfile(resultDir, 'geometry_compactness_bbox.tex');
 
 nR = numel(R);
 
@@ -564,6 +582,15 @@ end
 Tcompact = struct2table(S);
 Tcompact = sortrows(Tcompact, "cfgID");
 
+% If you’d rather report in cm:
+% cm = 100;
+% varsToScale = {'W_before_med','H_before_med','D_before_med','W_after_med','H_after_med','D_after_med', ...
+%                'W_before_iqr','H_before_iqr','D_before_iqr','W_after_iqr','H_after_iqr','D_after_iqr', ...
+%                'maxSpan_before_med','maxSpan_after_med'};
+% for v = varsToScale
+%     Tcompact.(v{1}) = cm*Tcompact.(v{1});
+% end
+% COMPACT.units = "cm";
 
 if COMPACT.printTable
     fprintf('\n=== Geometry compactness (axis-aligned bbox spans), units: %s ===\n', COMPACT.units);
@@ -602,7 +629,7 @@ if COMPACT.exportLatex
 end
 
 %% ===================== 3.5 POWER-LAW SCALING WITH MIC COUNT (CSV OUTPUT) =====================
-% Outputs a CSV table (one row per metric).
+% Outputs a CSV table (one row per metric) instead of making plots.
 
 PLAW = struct();
 PLAW.useRandomOnly = true;   % true = only random-start N sweep, false = all runs
@@ -613,7 +640,7 @@ PLAW.B = 2000;               % bootstrap samples
 PLAW.alpha = 0.05;           % 95% CI
 PLAW.makePlots = false;      % force OFF
 PLAW.exportCSV = true;
-PLAW.csvPath = fullfile("../results", "powerlaw_scaling_table.csv");  % change if you like
+PLAW.csvPath = fullfile(resultDir, 'powerlaw_scaling_table.csv');
 
 % Ensure output dir exists
 outDir = fileparts(PLAW.csvPath);
@@ -822,6 +849,7 @@ ax.XTickLabelRotation = 0;
 
 hold(ax,'off');
 axis square;
+box 'on';
 end
 
 function M0 = getStartM(H)
@@ -881,7 +909,7 @@ end
 end
 
 function idx = pickBestIterIdx(H)
-% Best = max passRate, tie-break by min p95Err, then max J
+% Best = max passRate, tie-break by min p95Err, then max J (as in your earlier logic)
 pass = arrayfun(@(x) x.stats.passRate, H.iter(:))';
 p95  = arrayfun(@(x) x.stats.p95Err,    H.iter(:))';
 J    = arrayfun(@(x) x.J,              H.iter(:))';

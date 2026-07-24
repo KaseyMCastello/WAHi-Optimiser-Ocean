@@ -29,18 +29,23 @@ The repository includes:
 
 - A full-featured **graphical user interface**
 - **Standalone installable application packages**
-- Batch-run pipelines used in the paper
-- Analysis scripts, figures, and exported results
+- The batch-run pipeline and analysis scripts used in the paper
+- The canonical starting geometries and example optimised geometries
+- The optimisation histories, figures, and exported summary tables reported in the paper
 
-See the folders `app` and `app_install`
+See `app/` for the MATLAB GUI source, `app_install/` for standalone installers,
+and `mat/` for the reproducible analysis workflow.
 
 ## Requirements
 
-- MATLAB (e.g. 2023b)
+- MATLAB R2023b or newer
   - Optimization Toolbox
   - Signal Processing Toolbox
   - Statistics and Machine Learning Toolbox
   - Communications Toolbox
+
+The standalone applications do not require a MATLAB licence, but do require the
+compatible MATLAB Runtime. See `app_install/README.md`.
 
 ---
 
@@ -68,7 +73,12 @@ Batch experiments and analysis scripts used in the paper are provided for full r
 
 📁 **MATLAB scripts**
 
-- mat/ — batch execution, analysis, and figure generation scripts
+- `mat/run_iwah_experiment_batch.m` — generate repeated canonical and random-start runs
+- `mat/iwah_batch_run_analyses.m` — batch summaries and the principal error figures
+- `mat/iwah_geometry_drift_plots_etc.m` — geometry drift, compactness, and scaling diagnostics
+- `mat/economy_gain_table.m` — economy and responsiveness summary
+- `mat/plot_canonical_configurations.m` — canonical-geometry reference figure
+- `mat/iwah_singleRun_analyses.m` — inspect one GUI-exported run
 
 📁 **Data**
 
@@ -87,11 +97,24 @@ Batch experiments and analysis scripts used in the paper are provided for full r
 
 Contains CSV files defining microphone array geometries used throughout the study, including:
 
-- Canonical polyhedral configurations (tetrahedron, octahedron, icosahedron, etc.)
-- Random initialisations
-- Optimised geometries exported directly from the GUI
+- Canonical starting configurations: pyramid, tetrahedron, octahedron, double
+  tetrahedron, pentagonal antiprism, and icosahedron
+- Example high-pass-rate four-microphone geometries exported from WAH-*i*
 
-These files can be loaded directly into the GUI or used for batch experiments.
+Random starting configurations are generated programmatically during batch runs and
+are therefore not stored as fixed CSV files. CSV geometries can be loaded directly
+into the GUI or used as starting conditions for batch experiments.
+
+The canonical configuration IDs used in the manuscript are:
+
+| ID | Starting geometry | Microphones |
+|---:|---|---:|
+| 1 | Pyramid | 4 |
+| 2 | Tetrahedron | 4 |
+| 3 | Octahedron | 6 |
+| 4 | Double tetrahedron | 8 |
+| 5 | Pentagonal antiprism | 10 |
+| 6 | Icosahedron | 12 |
 
 ## Source Code
 
@@ -161,4 +184,3 @@ and free public releases, consider buying me a coffee.
 </p>
 
 <p><em>All tools remain free for academic and research use.</em></p>
-
