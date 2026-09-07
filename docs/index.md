@@ -10,7 +10,42 @@ include_slider: true
 
 WAH-*i* (Widefield Acoustics Heuristic — *inverse iterative*; pronounced ***waa-hee*** [**/ˈwɑː.hiː/**]) is a MATLAB-based framework and a software tool for designing and optimising 3D microphone-array geometries for TDOA localisation. The GUI supports rapid iteration, evaluation over a user-defined Field of Accuracy (FoA), and iterative optimisation under real-world constraints (arm length, minimum spacing, etc.).
 
-[**Read the research paper**](https://doi.org/10.64898/2026.02.07.704547)
+<a class="button-pill button-pill--primary" href="https://doi.org/10.1111/2041-210X.70407" target="_blank" rel="noreferrer">Read the published paper</a>
+
+<details class="citation-card">
+  <summary>
+    <span>
+      <strong>Cite WAH-<em>i</em></strong>
+      <small>Published in <em>Methods in Ecology and Evolution</em></small>
+    </span>
+    <span class="citation-card__chevron" aria-hidden="true"></span>
+  </summary>
+
+  <div class="citation-card__body">
+    <div class="citation-card__doi">
+      <div>
+        <span class="citation-card__label">DOI</span>
+        <a href="https://doi.org/10.1111/2041-210X.70407" target="_blank" rel="noreferrer">10.1111/2041-210X.70407</a>
+      </div>
+      <button class="copy-button" type="button" data-copy-value="10.1111/2041-210X.70407">Copy DOI</button>
+    </div>
+
+    <div class="citation-card__bibtex">
+      <div class="citation-card__heading">
+        <span class="citation-card__label">BibTeX</span>
+        <button class="copy-button" type="button" data-copy-target="wahi-bibtex">Copy BibTeX</button>
+      </div>
+      <pre><code id="wahi-bibtex">@article{umadiWAHOptimisingMicrophone2026,
+  title   = {WAH-i: Optimising Microphone Array Geometry for Customised Localisation Accuracy},
+  author  = {Umadi, Ravi},
+  journal = {Methods in Ecology and Evolution},
+  year    = {2026},
+  doi     = {10.1111/2041-210X.70407},
+  url     = {https://doi.org/10.1111/2041-210X.70407}
+}</code></pre>
+    </div>
+  </div>
+</details>
 
 <section class="wahi-gallery">
   <h2>WAH-<em>i</em> in action</h2>
@@ -165,5 +200,4 @@ and free public releases, consider buying me a coffee.
   ☕ Buy me a coffee
 </a>
 </p> -->
-
 

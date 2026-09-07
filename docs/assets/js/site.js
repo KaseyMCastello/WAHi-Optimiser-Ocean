@@ -38,4 +38,36 @@ document.addEventListener("DOMContentLoaded", () => {
       }
     });
   }
+
+  document.querySelectorAll("[data-copy-value], [data-copy-target]").forEach((button) => {
+    const defaultLabel = button.textContent;
+
+    button.addEventListener("click", async () => {
+      const targetId = button.dataset.copyTarget;
+      const target = targetId ? document.getElementById(targetId) : null;
+      const value = button.dataset.copyValue || target?.textContent || "";
+
+      if (!value) return;
+
+      try {
+        await navigator.clipboard.writeText(value.trim());
+        button.textContent = "Copied";
+        button.classList.add("is-copied");
+      } catch (error) {
+        button.textContent = "Select and copy";
+        if (target) {
+          const selection = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(target);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }
+      }
+
+      window.setTimeout(() => {
+        button.textContent = defaultLabel;
+        button.classList.remove("is-copied");
+      }, 1800);
+    });
+  });
 });

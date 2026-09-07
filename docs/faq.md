@@ -29,7 +29,7 @@ A curated list of related publications is provided here:
 
 [Widefield acoustics heuristic: advancing microphone array design for accurate spatial tracking of echolocating bats](https://doi.org/10.1186/s12862-025-02441-4)
 
-[WAH-*i*: Optimising Microphone Array Geometry for Customised Localisation Accuracy](https://doi.org/10.64898/2026.02.07.704547)
+[WAH-*i*: Optimising Microphone Array Geometry for Customised Localisation Accuracy](https://doi.org/10.1111/2041-210X.70407)
 
 [BATSY4-PRO: An Open-Source Multichannel Ultrasound Recorder for Field Bioacoustics](https://doi.org/10.1101/2025.08.11.669530)
 

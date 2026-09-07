@@ -523,6 +523,119 @@ html[data-theme="dark"] .theme-toggle__icon--moon {
   font-size: 0.95rem;
 }
 
+.citation-card {
+  margin: 1.25rem 0 2.5rem;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line));
+  border-radius: var(--radius-lg);
+  background:
+    radial-gradient(circle at top right, color-mix(in srgb, var(--header-tint) 34%, transparent), transparent 42%),
+    linear-gradient(135deg, var(--surface-solid), var(--surface-alt));
+  box-shadow: var(--shadow-soft);
+}
+
+.citation-card > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 1.15rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.citation-card > summary::-webkit-details-marker {
+  display: none;
+}
+
+.citation-card > summary strong,
+.citation-card > summary small {
+  display: block;
+}
+
+.citation-card > summary strong {
+  font-family: "Merriweather", serif;
+  font-size: 1.08rem;
+}
+
+.citation-card > summary small {
+  margin-top: 0.2rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.citation-card__chevron {
+  width: 0.7rem;
+  height: 0.7rem;
+  flex: 0 0 auto;
+  border-right: 2px solid var(--accent-strong);
+  border-bottom: 2px solid var(--accent-strong);
+  transform: rotate(45deg) translateY(-0.15rem);
+  transition: transform 0.2s ease;
+}
+
+.citation-card[open] .citation-card__chevron {
+  transform: rotate(225deg) translate(-0.1rem, -0.1rem);
+}
+
+.citation-card__body {
+  padding: 0 1.15rem 1.15rem;
+  border-top: 1px solid var(--line);
+}
+
+.citation-card__doi,
+.citation-card__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.citation-card__doi {
+  padding: 1rem 0;
+}
+
+.citation-card__label {
+  display: block;
+  margin-bottom: 0.2rem;
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.citation-card__bibtex pre {
+  margin: 0.65rem 0 0;
+  font-size: 0.84rem;
+}
+
+.copy-button {
+  min-height: 36px;
+  flex: 0 0 auto;
+  padding: 0.48rem 0.78rem;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line));
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.copy-button:hover {
+  transform: translateY(-1px);
+  background: color-mix(in srgb, var(--accent-soft) 72%, var(--accent) 28%);
+}
+
+.copy-button.is-copied {
+  border-color: color-mix(in srgb, var(--success) 55%, var(--line));
+  background: color-mix(in srgb, var(--success) 18%, var(--surface-solid));
+  color: var(--text);
+}
+
 .wahi-gallery {
   margin: 2.5rem 0;
 }
@@ -713,6 +826,17 @@ html[data-theme="dark"] .theme-toggle__icon--moon {
   .button-pill,
   .btn {
     width: 100%;
+  }
+
+  .citation-card__doi,
+  .citation-card__heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .citation-card__doi .copy-button,
+  .citation-card__heading .copy-button {
+    width: auto;
   }
 
   .wahi-slider-btn {
