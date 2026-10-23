@@ -1,49 +1,24 @@
-# WAH-*i* MATLAB GUI (`wahi_gui`)
+# WAH-*i* Ocean GUI (`wahi_gui`)
 
-This folder contains the **interactive MATLAB graphical user interface** for **WAH-*i***  
-
-(*Widefield Acoustics Heuristic – inverse, iterative*), An array-geometry optimisation tool for designing microphone arrays with customised localisation accuracy.
-
-The GUI provides an end-to-end workflow for:
-
-- Designing and editing microphone geometries
-- Evaluating 3D fields of localisation accuracy
-- Running forward WAH evaluation and WAH-*i* geometry optimisation
-- Exporting optimisation runs for reproducible analysis
-
----
-
-## Launching the GUI
-
-From MATLAB, add `app/` and `src/` to the path, then run:
+Interactive MATLAB app for designing and optimising hydrophone arrays for whale localisation.
 
 ```matlab
 addpath("app", "src")
 wahi_gui
 ```
 
-The GUI source depends on the core files in `src/`, particularly
-`BatCallLocaliser.m`, `iwah_run_optimiser_core.m`, `plotCSV3D.m`, and
-`formatLatex.m`.
+`wahi_gui` adds `../src` to the path automatically when run from the repository.
 
-![iwah_gui_start](../img/iwah_gui_start.png)
+Workflow:
 
-*The WAH-i GUI at launch*
+1. **Array Design** — generate a pattern (dx/dy spacing), edit coordinates in the table, export the CSV.
+2. **Environment** — optional bathymetry, sound-speed model (constant / 1-D / NCOM), noise and detection
+   settings, clock and survey uncertainty. Check the SNR-vs-range plot.
+3. **Calls** — species preset or imported template (vector of points or .wav).
+4. **Field & Optimise** — set the field (radius up to 100 km, spacing, depths, sector), *Evaluate field*,
+   *Optimise geometry*, *Array position sweep*, report and exports.
 
-## Files Produced by the GUI
+*Menu → Save session / Load session* stores every setting together with the array, bathymetry,
+sound-speed data and call template. *Menu → Tips* has workflow and interpretation notes.
 
-- **Export Run** writes a MAT file containing the complete optimiser history
-  `H` and `runInfo`. These files can be inspected with
-  `../mat/iwah_singleRun_analyses.m`.
-- **Export Geometry** writes the current microphone coordinates as CSV for
-  reuse, construction, or CAD workflows.
-- **Report** creates a summary figure and optionally saves it as PNG.
-
-The GUI exposes signal, grid, accuracy, physical-constraint, and optimiser
-settings. Numerical results are conditional on these choices; users should
-rerun the optimisation with parameters representative of their species,
-recording system, observation volume, and deployment constraints.
-
-## Preferred Font
-
-For the app to look its best, [install the Lato font](https://fonts.google.com/specimen/Lato) on your computer.
+See the top-level README for file formats and model assumptions.

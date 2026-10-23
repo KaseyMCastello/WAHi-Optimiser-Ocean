@@ -1,3 +1,8 @@
+> **WAH-*i* Ocean note:** these scripts reproduce the original microphone/bat paper and use the
+> old `BatCallLocaliser` pipeline. They are not compatible with the ocean version of
+> `src/iwah_run_optimiser_core.m` and are kept only for reference. For scripted ocean runs see
+> the *Batch / scripted runs* section of the top-level README.
+
 # MATLAB Analysis Scripts (`mat/`)
 
 This folder contains the MATLAB scripts used for batch optimisation, post-hoc

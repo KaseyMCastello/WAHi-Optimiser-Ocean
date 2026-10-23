@@ -1,0 +1,15 @@
+# WAH-i Ocean hydrophone geometry
+# origin_x_m=0.000
+# origin_y_m=0.000
+# placement_mode=frame
+# reference_depth_m=500.000
+# yaw_deg=0.0000
+# pitch_deg=0.0000
+# roll_deg=0.0000
+# x/y/z_rel_m = design (body-frame) coordinates; z = height above bottom (seafloor mode) or up from the frame base / reference depth
+# east/north/up_rel_m = offsets from the origin after yaw/pitch/roll
+id,x_rel_m,y_rel_m,z_rel_m,east_rel_m,north_rel_m,up_rel_m,x_abs_m,y_abs_m,depth_m,lat,lon
+1,0.0000,0.5774,0.3000,0.0000,0.5774,0.3000,0.000,0.577,999.700,NaN,NaN
+2,-0.5000,-0.2887,0.3000,-0.5000,-0.2887,0.3000,-0.500,-0.289,999.700,NaN,NaN
+3,0.5000,-0.2887,0.3000,0.5000,-0.2887,0.3000,0.500,-0.289,999.700,NaN,NaN
+4,0.0000,0.0000,1.1165,0.0000,0.0000,1.1165,0.000,0.000,998.884,NaN,NaN

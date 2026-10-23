@@ -1,3098 +1,2428 @@
 function wahi_gui()
-% WAH-i GUI — Microphone Array Design & Optimisation (iWAH)
+% WAH-i Ocean GUI - Hydrophone Array Design & Optimisation for whale localisation
 %
-% Purpose
-% -------
-% This application provides an interactive interface to design and optimise 3D
-% microphone-array geometries for time-difference-of-arrival (TDOA) localisation.
-% It evaluates localisation performance over a user-defined 3D “Field of Accuracy”
-% (FoA) and applies an iterative, heuristic optimiser (WAH-i) to improve pass rate
-% and error statistics under geometric constraints.
+% Adapted from WAH-i (Ravi Umadi, 2026, GPLv3) - originally a microphone-array
+% optimiser for echolocating bats. This modified version replaces the in-air
+% bat-call model with an underwater model for baleen and toothed whales:
+% hydrophones, bathymetry, sound-speed profiles, transmission loss, ambient
+% noise, and fields of accuracy out to 100 km.
 %
-% What this GUI does
-% ------------------
-% 1) Geometry creation and management
-%    - Generate random non-coplanar arrays under radius and spacing constraints.
-%    - Load/save array geometry from/to CSV (Nx3: [x y z] in metres).
-%    - Manually edit individual microphone positions (sliders + edit boxes).
-%    - Re-centre arrays to keep the centroid at the origin.
+% Tabs
+% ----
+% 1 Array Design     Build an initial hydrophone layout (patterns with x/y
+%                    spacing, or type coordinates into the table), zoomed plan
+%                    and side views, pair distances, CSV import/export.
+% 2 Environment      Bathymetry (optional), sound speed (constant, 1-D
+%                    profile, or 3-D NCOM NetCDF field), sonar-equation SNR,
+%                    detection threshold, clock / survey uncertainty.
+% 3 Calls            Species presets (fin, blue, humpback, right, minke,
+%                    sperm, delphinid, beaked) or an imported template
+%                    (waveform samples, frequency contour, or .wav).
+% 4 Field & Optimise Evenly spaced synthetic sources in a horizontal field
+%                    (up to 100 km), evaluation (WAH), optimisation (WAH-i),
+%                    array-position sweep, reports and exports.
 %
-% 2) Field-of-Accuracy (FoA) evaluation
-%    - Builds a spherical-shell grid (Rin → R) with configurable spacing.
-%    - Allows selecting which octants (“Optimisation Octants”) contribute to the grid.
-%    - Runs the localisation pipeline at each grid point:
-%         simulate -> TDOA estimation (xcorr) -> global solve (lsqnonlin)
-%    - Produces performance statistics:
-%         pass rate, mean error, 95th percentile, max error, failure counts.
-%    - Visualises the FoA as a 3D colour field (position error or angular error).
+% Coordinates: x East, y North (m, local), z elevation (m, negative below the
+% surface). Hydrophone geometry is stored RELATIVE to the array origin; the
+% z column is height above the seafloor (seafloor-mounted) or an offset from
+% the reference depth (fixed-depth).
 %
-% 3) Optimisation (WAH-i)
-%    - Iteratively perturbs microphone positions using a probe-direction rule set.
-%    - Accepts updates that improve a scalar score:
-%         J = passRate − λ * (meanErr / failPenalty)
-%    - Includes stall detection and “shake/reset” steps to escape local optima.
-%    - Logs a complete run history (H) for reproducibility and post-analysis.
+% Requirements: MATLAB R2021a or newer (App Designer components). No toolboxes
+% are required; the Parallel Computing Toolbox is used if you enable it.
+% src/ must be on the path (added automatically when run from the repo).
 %
-% 4) Reporting and export
-%    - Export Run: saves run history (H) and runInfo to a MAT-file (-v7.3).
-%    - Report: generates a single-run report figure (before vs after, drift, etc.)
-%      with optional PNG export.
-%    - Export Workspace: assigns key variables into the base workspace.
-%
-% Key concepts and definitions
-% ----------------------------
-% - FoA shell:
-%     A hollow spherical region (Rin <= r <= R) sampled on a 3D Cartesian grid.
-% - Threshold:
-%     threshold_cm = best_cm + tol_cm. “Pass” points satisfy error <= threshold_cm.
-% - Failure handling:
-%     Points that fail simulation/TDOA/solve are penalised (failPenalty_cm).
-%     Grid points too close to microphones can be excluded (minDistToAnyMic) or
-%     forced to penalty when within epsDist.
-% - Metrics:
-%     * Position error (cm): Euclidean distance between estimated and true source.
-%     * Angular error (deg): crude azimuth/elevation deviation relative to mic 1.
-%
-% Requirements
-% ------------
-% - MATLAB (App Designer UI components: uifigure/uigridlayout/uiaxes/etc.)
-% - Optimization Toolbox (lsqnonlin)
-% - BatCallLocaliser.m on the MATLAB path (incldued in src/)
-%
-% File I/O conventions
-% --------------------
-% - Geometry CSV:
-%     Nx3 numeric matrix with columns [x y z] in metres. Values must be finite.
-%     Loaded geometries are re-centred to zero mean.
-% - Run export MAT:
-%     Saves variables:
-%       H       : run history struct (H.meta, H.iter records)
-%       runInfo : small metadata struct for external scripts/tools
-%
-% Typical User workflow
-% ---------------------------
-% 1) Generate or load a geometry:
-%       “1 Random Config” or “Load Config”
-% 2) Set FoA + thresholds (Array & Field Parameters), choose octants.
-% 3) Click “Apply Changes” (after any edits) to synchronise all parameters.
-% 4) Evaluate baseline FoA:
-%       “2 Run WAH”
-% 5) Optimise:
-%       “3 Optimise”
-% 6) Review results:
-%       “Report”, “Export Run”, and/or “Export Workspace”
-%
-% Computational caution
-% ---------------------
-% Evaluation cost grows rapidly with:
-%   - smaller grid spacing (denser FoA grid),
-%   - larger FoA radius (more grid points),
-%   - more microphones (more pairwise delays and solve complexity),
-%   - longer synthesis tail padding (more samples, slower TDOA estimation).
-% Ensure adequate CPU/RAM resources before running high-resolution setups.
-% Primary development/testing was performed on Apple M1/M2 systems, with only
-% limited testing on an Intel i5–class processor.
-%
-% Licensing and disclaimers
-% -------------------------
-% This software is provided “as is”, without warranty of any kind. Use at your
-% own risk. The author assumes no liability for results, field use, or downstream
-% decisions based on this tool.
-%
-% Author / Citation
-% -----------------
-% Ravi Umadi (2026)
-% WAH-i —Optimising Array Geometry for Customised Localisation Accuracy
-% Related work is referenced in the About dialog within the GUI.
-%
-% -------------------------------------------------------------------------
-% Code: GUI state initialisation, defaults, theme, UI layout,
-% callbacks, evaluation routines, optimiser, and report utilities.
-% -------------------------------------------------------------------------
+% Licence: GPLv3 (see LICENSE.md). Original WAH-i: https://github.com/raviumadi/WAHi-Optimiser
+
+%% -------------------- Path --------------------
+if ~isdeployed
+    uHere = fileparts(mfilename('fullpath'));
+    uSrc = fullfile(uHere, '..', 'src');
+    if exist(uSrc, 'dir') && isempty(strfind(path, uSrc)), addpath(uSrc); end
+end
+IS_DEPLOYED = isdeployed;
 
 %% -------------------- State --------------------
-IS_DEPLOYED = isdeployed;
 S = struct();
-S.M = [];
-S.gridPts = [];
-S.lastStats = struct('passRate',0,'meanErr',NaN,'p95Err',NaN,'maxErr',NaN,'threshold_cm',NaN);
-S.diag = struct();
-S.metric = "pos";
+S.M = [];                       % N x 3 relative hydrophone geometry
+S.env = OceanEnvironment.default();
+S.sspProfile = [];              % loaded 1-D profile
+S.ncom = [];                    % loaded 3-D field
+S.callTemplate = struct('values',[],'fs',NaN,'amp',[],'guess','','file','');
+S.call = []; S.band = [NaN NaN];
+S.gridPts = []; S.gridInfo = [];
+S.stats = []; S.diag = struct();
+S.H = []; S.runInfo = [];
+S.sweep = [];
 S.stopFlag = false;
-S.rngSeed = 42;
+S.busy = false;
+S.selRows = [];
+S.progressPrefix = '';
+S.lastEnvDisplay = '';
 
-% Quadrant selection state (all enabled by default)
-S.quadrants = struct( ...
-    'frontTopLeft',true,'frontTopRight',true,'frontBottomLeft',true,'frontBottomRight',true, ...
-    'backTopLeft',true,'backTopRight',true,'backBottomLeft',true,'backBottomRight',true );
+CTRL = struct();    % key -> UI handle
+PARAMCB = @(src,~) onParamChanged(src.Tag);   % shared ValueChangedFcn (key stored in Tag)
+PROGRESSCB = @(i,n) progressCb(i,n);
+DEF = struct();     % key -> default value
+GRP = struct();     % key -> group name
 
-% Run history (batch-style)
-S.H = [];
-S.runInfo = [];
-%LabelFontSize = 10;  % overridden by THEME below
-
-%% -------------------- Defaults --------------------
-DEF = struct();
-
-% State defaults
-DEF.rngSeed = 1;
-
-% Array & Field defaults
-DEF.Lmax        = 0.50;
-DEF.N           = 4;
-DEF.minPairDist = 0.125;
-DEF.minDistAny  = 0.08;
-DEF.R           = 2.0;
-DEF.Rin         = 0.30;
-DEF.step        = 0.50;
-DEF.epsDist     = 0.03;
-DEF.best_cm     = 10;
-DEF.tol_cm      = 5;
-DEF.lambdaMean  = 0.15;
-DEF.failPen_cm  = 1000;
-
-% Optimiser defaults
-DEF.maxIters    = 25;
-DEF.probes      = 14;
-DEF.initStep    = 0.25;
-DEF.minStep     = 0.03;
-DEF.stall       = 12;
-DEF.shake       = 0.08;
-DEF.epsJ        = 1e-6;
-DEF.targetPass  = 0.95;
-
-% Call synthesis defaults
-DEF.fs       = 192000;
-DEF.dur_ms   = 5;
-DEF.f1       = 30000;
-DEF.f0       = 70000;
-DEF.snr_db   = 40;
-DEF.tail_pct = 200;
-DEF.callType = 'FM';
-
-% Quadrants defaults (all enabled)
-DEF.quadrants = struct( ...
-    'frontTopLeft',true,'frontTopRight',true,'frontBottomLeft',true,'frontBottomRight',true, ...
-    'backTopLeft',true,'backTopRight',true,'backBottomLeft',true,'backBottomRight',true );
-
-% -------------------- Modern theme --------------------
 THEME = struct();
-preferred = ["Lato", "Segoe UI", "Helvetica Neue", "Helvetica", "DejaVu Sans", "Arial"];
-
-try
-    if isdeployed
-        % Deployed: be conservative (fonts can behave differently)
-        available = strings(0,1);
-    else
-        available = string(listfonts);
-    end
-catch
-    available = strings(0,1);
-end
-
-THEME.fontName = 'Helvetica'; % safe fallback
-for f = preferred
-    if any(strcmpi(available, f))
-        THEME.fontName = char(f);
-        break;
-    end
-end
-% Fresher, more colourful palette (soft pastels + teal accent)
-THEME.baseBg       = [0.98 0.995 0.99]; % very light mint background
-THEME.panelBg      = [0.995 1.0 0.99];   % card background with a mint hint
-THEME.mutedBg      = [0.98 0.98 1.00];   % soft lavender for muted panels
-THEME.panelAlt     = [1.00 0.995 0.98];  % warm cream alternate card
+THEME.baseBg       = [0.97 0.985 0.995];
+THEME.panelBg      = [0.995 1.0 1.0];
+THEME.mutedBg      = [0.97 0.98 1.00];
+THEME.panelAlt     = [1.00 0.995 0.98];
 THEME.textColor    = [0.10 0.12 0.15];
-THEME.accentColor  = [0.00 0.62 0.60];   % teal-cyan accent
-THEME.secondaryBtn = [0.88 0.94 0.97];   % soft blue-gray for secondary buttons
-THEME.successColor = [0.15 0.75 0.45];   % brighter green for success/apply
-THEME.headerTeal   = [0.62 0.82 0.78];   % neutral teal tint for headers
-LabelFontSize = 11;
+THEME.accentColor  = [0.00 0.45 0.70];
+THEME.secondaryBtn = [0.88 0.93 0.97];
+THEME.headerTeal   = [0.62 0.80 0.86];
 
-%% -------------------- UI --------------------
-fig = uifigure('Name','WAH-i — Microphone Array Design & Optimisation (Umadi, 2026) V1.0','Position',[60 60 1650 920], 'Resize', 'off');
+%% -------------------- Figure --------------------
+uScr = get(0, 'ScreenSize');
+uW = max(1200, min(1600, uScr(3) - 60)); uH = max(700, min(900, uScr(4) - 90));
+fig = uifigure('Name','WAH-i Ocean - Hydrophone Array Design & Optimisation', ...
+    'Position',[30 40 uW uH]);
 fig.Color = THEME.baseBg;
-% Some MATLAB releases don't support setting FontName/FontSize on uifigure.
-% Wrap in try/catch to remain compatible.
-try
-    fig.FontName = THEME.fontName;
-    fig.FontSize = 11;
-catch
-    % uifigure doesn't support these properties in this MATLAB version — skip.
-end
 
-%% -------------------- Top menu --------------------
-mHelp = uimenu(fig, 'Text', 'Menu');
+uMenu = uimenu(fig, 'Text', 'Menu');
+uimenu(uMenu, 'Text', 'Save session...', 'MenuSelectedFcn', @(~,~)doSaveSession());
+uimenu(uMenu, 'Text', 'Load session...', 'MenuSelectedFcn', @(~,~)doLoadSession());
+uimenu(uMenu, 'Text', 'Reset defaults', 'MenuSelectedFcn', @(~,~)doResetDefaults(), 'Separator','on');
+uimenu(uMenu, 'Text', 'Tips', 'MenuSelectedFcn', @(~,~)showTips(), 'Separator','on');
+uimenu(uMenu, 'Text', 'About', 'MenuSelectedFcn', @(~,~)showAbout());
 
-uimenu(mHelp, 'Text', 'About', 'MenuSelectedFcn', @(~,~)showAbout());
-uimenu(mHelp, 'Text', 'Tips',  'MenuSelectedFcn', @(~,~)showTips());
-DOC_URL = 'https://raviumadi.github.io/WAHi-Optimiser';
-uimenu(mHelp, 'Text', 'Guide', 'MenuSelectedFcn', @(~,~)openGuide(DOC_URL));
+uRoot = uigridlayout(fig, [2 1]);
+uRoot.RowHeight = {'1x', 24};
+uRoot.Padding = [8 6 8 6];
+uRoot.RowSpacing = 4;
 
-% Set control defaults so created UI components inherit the theme font where supported.
-try
-    fig.DefaultUilabelFontName    = THEME.fontName;
-    fig.DefaultUilabelFontSize    = 11;
-    fig.DefaultUibuttonFontName   = THEME.fontName;
-    fig.DefaultUibuttonFontSize   = 10;
-    fig.DefaultUieditfieldFontName= THEME.fontName;
-    fig.DefaultUieditfieldFontSize= 10;
-    fig.DefaultUidropdownFontName = THEME.fontName;
-    fig.DefaultUidropdownFontSize = 10;
-    fig.DefaultUipanelFontName    = THEME.fontName;
-    fig.DefaultUipanelFontSize    = 11;
-    fig.DefaultUicheckboxFontName = THEME.fontName;
-catch
-    % Older MATLAB releases may not support default properties on uifigure — ignore.
-end
+tg = uitabgroup(uRoot);
+tg.Layout.Row = 1;
+tabArr  = uitab(tg, 'Title', '1  Array Design');
+tabEnv  = uitab(tg, 'Title', '2  Environment');
+tabCall = uitab(tg, 'Title', '3  Calls');
+tabFoA  = uitab(tg, 'Title', '4  Field & Optimise');
 
-% 1 row, 2 columns: Controls | Plot
-root = uigridlayout(fig,[1 2]);
-root.ColumnWidth = {800, '1x'};
-root.RowHeight   = {'1x'};
-root.Padding = [12 12 12 12];
-root.ColumnSpacing = 12;
-% root.BackgroundColor = 'w';
-%% Left panel (scrollable)
-pLeft = uipanel(root,'Title','CONFIGURATIONS & CONTROLS','FontWeight','bold','FontSize',12);
-pLeft.Layout.Row = 1;
-pLeft.Layout.Column = 1;
-pLeft.BackgroundColor = THEME.panelAlt;
-% pLeft.Scrollable = 'on';
-
-% Two columns inside the controls panel (3 rows × 2 cols)
-% Left col:  Array/Field  | Optimiser  | Call synthesis
-% Right col: Mic editor   | Display    | Workflow actions
-gLeft = uigridlayout(pLeft,[3 2]);
-gLeft.RowHeight      = {370, 250, '1x'};     % tune heights as you like
-gLeft.ColumnWidth    = {'0.8x','1x'};
-gLeft.Padding        = [10 10 10 10];
-gLeft.RowSpacing     = 12;
-gLeft.ColumnSpacing  = 12;
-% gLeft.Scrollable = 'on';
-%% Right panel: plot + stats + quadrants
-pRight = uipanel(root,'Title','3D FIELD OF ACCURACY','FontWeight','bold','FontSize',12);
-pRight.Layout.Row = 1; pRight.Layout.Column = 2;
-pRight.BackgroundColor = THEME.panelBg;
-
-gRight = uigridlayout(pRight,[2 1]);
-gRight.RowHeight = {'1x', 90};   % plot | stats
-gRight.Padding = [10 10 10 10];
-gRight.RowSpacing = 10;
-
-% --- Plot area (unchanged) ---
-gPlot = uigridlayout(gRight,[2 1]);
-gPlot.Layout.Row = 1;
-gPlot.RowHeight = {22,'1x'};
-gPlot.Padding = [0 0 0 0];
-gPlot.RowSpacing = 6;
-
-lblStatus = uilabel(gPlot,'Text','Ready','FontWeight','bold');
-lblStatus.Layout.Row = 1;
-lblStatus.FontName = THEME.fontName;
+lblStatus = uilabel(uRoot, 'Text', 'Ready', 'FontWeight', 'bold');
+lblStatus.Layout.Row = 2;
 lblStatus.FontColor = THEME.textColor;
-lblStatus.FontSize = 12;
 
-ax = uiaxes(gPlot);
-ax.Layout.Row = 2;
-grid(ax,'on'); axis(ax,'equal'); view(ax,3);
-xlabel(ax,'X (m)','FontWeight','bold','FontSize',10);
-ylabel(ax,'Y (m)','FontWeight','bold','FontSize',10);
-zlabel(ax,'Z (m)','FontWeight','bold','FontSize',10);
+%% ====================================================================
+%  TAB 1 - ARRAY DESIGN
+%% ====================================================================
+gArr = uigridlayout(tabArr, [1 2]);
+gArr.ColumnWidth = {470, '1x'};
+gArr.Padding = [8 8 8 8];
+gArr.ColumnSpacing = 10;
 
-% --- Bottom row: stats only ---
-pStats = uipanel(gRight,'Title','Performance','FontWeight','bold','FontSize',11);
-pStats.Layout.Row = 2;
-pStats.BackgroundColor = THEME.panelBg;
+gArrL = uigridlayout(gArr, [3 1]);
+gArrL.Layout.Row = 1; gArrL.Layout.Column = 1;
+gArrL.RowHeight = {300, 292, '1x'};
+gArrL.Scrollable = 'on';
+gArrL.Padding = [0 0 0 0];
+gArrL.RowSpacing = 8;
 
-gStats = uigridlayout(pStats,[1 1]);
-gStats.Padding = [10 8 10 10];
+gPlace = mkPanelGrid(gArrL, 'Placement, orientation & constraints', 11, 1, 1, THEME.panelBg);
+addNum(gPlace, 'Array origin East X (m):', 'ox', 0, [-2e5 2e5], '%.1f', ...
+    'Array origin in the local frame (m East of the map origin). Hydrophone coordinates are relative to this point.', false, 'array');
+addNum(gPlace, 'Array origin North Y (m):', 'oy', 0, [-2e5 2e5], '%.1f', ...
+    'Array origin in the local frame (m North of the map origin).', false, 'array');
+addDrop(gPlace, 'Placement:', 'placeMode', {'Seafloor-mounted (each element)','Seafloor frame (rigid)','Fixed depth (rigid)'}, ...
+    'Seafloor-mounted (each element)', ['Each element: every hydrophone sits on the local seafloor, z = height above bottom (yaw only). ' ...
+    'Seafloor frame: rigid frame whose origin rests on the seafloor; z = height above the frame base; yaw/pitch/roll applied. ' ...
+    'Fixed depth: rigid array at the reference depth; z = up from the reference point; yaw/pitch/roll applied.'], 'array');
+addNum(gPlace, 'Reference depth (m) [fixed mode]:', 'refDepth', 500, [0 11000], '%.1f', ...
+    'Depth of the array origin when Placement = Fixed depth.', false, 'array');
+addNum(gPlace, 'Yaw (deg, CCW from East):', 'yaw', 0, [-360 360], '%.2f', ...
+    'Rotation about the vertical through the array origin. +90 turns the body +x axis from East to North.', false, 'array');
+addNum(gPlace, 'Pitch (deg, about body x):', 'pitch', 0, [-180 180], '%.2f', ...
+    'Tilt about the body x axis; + raises the +y end. Applied before yaw. Ignored for each-element seafloor placement.', false, 'array');
+addNum(gPlace, 'Roll (deg, about body y):', 'roll', 0, [-180 180], '%.2f', ...
+    'Tilt about the body y axis; + lowers the +x end. Applied first (roll -> pitch -> yaw). Ignored for each-element seafloor placement.', false, 'array');
+addNum(gPlace, 'Max array radius Lmax (m):', 'Lmax', 2000, [1 1e5], '%.1f', ...
+    'Maximum HORIZONTAL distance of any hydrophone from the array centroid (optimiser constraint).', false, 'array');
+addNum(gPlace, 'Min hydrophone spacing (m):', 'minPair', 100, [0 1e5], '%.1f', ...
+    'Minimum allowed distance between any pair of hydrophones (optimiser constraint).', false, 'array');
+lblArrDepth = addInfo(gPlace, 'Seafloor at origin: ---', 2);
 
-lblStats = uilabel(gStats);
-% lblStats.FontName  = 'Helvetica';   % nice alignment (optional)
-% lblStats.FontWeight = 'bold';
-lblStats.FontSize  = 12;
-lblStats.FontName  = THEME.fontName;
-lblStats.FontColor = THEME.textColor;
-lblStats.VerticalAlignment   = 'center';
-lblStats.HorizontalAlignment = 'center';
-lblStats.WordWrap = 'on';
+gPat = mkPanelGrid(gArrL, 'Pattern generator', 10, 2, 1, THEME.mutedBg);
+addDrop(gPat, 'Pattern:', 'patName', HydrophoneGeometry.patternNames(), 'Polygon + centre', ...
+    'Starting layout. Use the table afterwards for uneven / custom spacing.', 'none');
+addNum(gPat, 'Number of hydrophones:', 'patN', 4, [3 64], '%d', 'Used by polygon, line, L-shape and random patterns.', true, 'none');
+addNum(gPat, 'Spacing dx (m):', 'patDx', 1000, [0.01 1e5], '%g', ...
+    'Polygon radius (centre-to-vertex), grid/line x spacing, L-shape x-arm spacing, or the side/edge length of the square, tetrahedron, cube and octahedron.', false, 'none');
+addNum(gPat, 'Spacing dy (m):', 'patDy', 1000, [0.01 1e5], '%g', 'Grid y spacing, or L-shape y-arm spacing.', false, 'none');
+addNum(gPat, 'Grid columns nx:', 'patNx', 2, [1 32], '%d', 'Rectangular grid only.', true, 'none');
+addNum(gPat, 'Grid rows ny:', 'patNy', 2, [1 32], '%d', 'Rectangular grid only.', true, 'none');
+addNum(gPat, 'Rotation (deg, CCW):', 'patRot', 0, [-360 360], '%.1f', 'Rotates the pattern counter-clockwise about its centroid.', false, 'none');
+addNum(gPat, 'Random jitter sigma (m):', 'patJit', 0, [0 1e4], '%.1f', 'Adds Gaussian jitter to x/y so the spacing is not perfectly even.', false, 'none');
+addNum(gPat, 'z: height above bottom / offset (m):', 'patZ', 5, [-5000 5000], '%.1f', ...
+    'Seafloor mode: height above bottom. Fixed mode: vertical offset from reference depth (positive = shallower).', false, 'none');
+addButtons(gPat, {'Generate pattern'}, {@(~,~)doGeneratePattern()}, true);
 
-% Initial placeholder
-lblStats.Text = sprintf([ ...
-    'Pass: --- |  ' ...
-    'Mean: ---  |  ' ...
-    'P95:  --- |  ' ...
-    'Max:  ---\n\n' ...
-    'Fails: ---  |  ' ...
-    'Geometry: ---  | ' ...
-    'Grid Points: ---' ]);
-%% ==================== Array & Field Parameters (geometry + FoA/grid/threshold) ====================
-pArray = uipanel(gLeft,'Title','Array & Field Parameters','FontWeight','bold','FontSize',11);
-pArray.Layout.Row = 1;
-pArray.Layout.Column = 1;
-pArray.BackgroundColor = THEME.panelBg;
-pArray.Scrollable = 'on';
+pTbl = uipanel(gArrL, 'Title', 'Hydrophones (click a cell to edit)', 'FontWeight', 'bold');
+pTbl.Layout.Row = 3; pTbl.BackgroundColor = THEME.panelBg;
+gTbl = uigridlayout(pTbl, [3 1]);
+gTbl.RowHeight = {'1x', 28, 28};
+gTbl.Padding = [6 6 6 6];
+gTbl.RowSpacing = 6;
+tblHyd = uitable(gTbl, 'Data', zeros(0,4), 'ColumnName', {'#','x (m)','y (m)','z HAB (m)'}, ...
+    'ColumnEditable', [false true true true], 'RowName', {}, ...
+    'CellEditCallback', @(src,evt)onTableEdit(src,evt), ...
+    'CellSelectionCallback', @(src,evt)onTableSelect(src,evt));
+tblHyd.Layout.Row = 1;
+uB = addButtons(gTbl, {'Add','Remove selected','Re-centre','Sort by #'}, ...
+    {@(~,~)doAddHyd(), @(~,~)doRemoveHyd(), @(~,~)doRecentre(), @(~,~)doRenumber()}, false);
+uB.Layout.Row = 2;
+uB = addButtons(gTbl, {'Import CSV...','Export CSV...','Evaluate this array (tab 4)'}, ...
+    {@(~,~)doImportGeometry(), @(~,~)doExportGeometry(), @(~,~)goEvaluate()}, false);
+uB.Layout.Row = 3;
 
-% Rows: RNG(2 rows) + 10 params = 12 total
-gArray = uigridlayout(pArray,[12 2]);
-gArray.RowHeight      = repmat({20},1,12);
-gArray.ColumnWidth    = {200,'1x'};  % label | control
-gArray.Padding        = [10 10 10 10];
-gArray.RowSpacing     = 6;
-gArray.ColumnSpacing  = 8;
-gArray.Scrollable = 'on';
-r = 1;
+gArrR = uigridlayout(gArr, [3 2]);
+gArrR.Layout.Row = 1; gArrR.Layout.Column = 2;
+gArrR.RowHeight = {26, '2x', '1x'};
+gArrR.ColumnWidth = {'1.3x', '1x'};
+gArrR.Padding = [0 0 0 0];
+gArrR.RowSpacing = 6; gArrR.ColumnSpacing = 8;
+gArrTools = uigridlayout(gArrR, [1 4]);
+gArrTools.Layout.Row = 1; gArrTools.Layout.Column = [1 2];
+gArrTools.Padding = [0 0 0 0];
+gArrTools.ColumnWidth = {'fit','fit','fit','1x'};
+cbPairLines = uicheckbox(gArrTools, 'Text', 'Show pair distances', 'Value', true, ...
+    'ValueChangedFcn', @(~,~)refreshArrayTab());
+cbArrBathy = uicheckbox(gArrTools, 'Text', 'Show bathymetry contours', 'Value', true, ...
+    'ValueChangedFcn', @(~,~)refreshArrayTab());
+cbArrLmax = uicheckbox(gArrTools, 'Text', 'Show Lmax circle', 'Value', true, ...
+    'ValueChangedFcn', @(~,~)refreshArrayTab());
+lblArrValid = uilabel(gArrTools, 'Text', '', 'FontWeight', 'bold');
 
-% --- RNG seed ---
-lbl = uilabel(gArray,'Text','Random seed:','FontWeight','bold','FontSize', LabelFontSize);
-lbl.Layout.Row = r; lbl.Layout.Column = 1;
+axArrPlan = uiaxes(gArrR);
+axArrPlan.Layout.Row = 2; axArrPlan.Layout.Column = [1 2];
+axArrSide = uiaxes(gArrR);
+axArrSide.Layout.Row = 3; axArrSide.Layout.Column = 1;
+gArrInfo = uigridlayout(gArrR, [2 1]);
+gArrInfo.Layout.Row = 3; gArrInfo.Layout.Column = 2;
+gArrInfo.RowHeight = {'fit', '1x'};
+gArrInfo.Padding = [0 0 0 0];
+lblArrStats = uilabel(gArrInfo, 'Text', '', 'WordWrap', 'on', 'VerticalAlignment', 'top');
+uTgInfo = uitabgroup(gArrInfo);
+uTabW = uitab(uTgInfo, 'Title', 'World coordinates');
+uTabP = uitab(uTgInfo, 'Title', 'Pair distances');
+uGW = uigridlayout(uTabW, [1 1]); uGW.Padding = [2 2 2 2];
+tblWorld = uitable(uGW, 'Data', [], 'RowName', {}, ...
+    'ColumnName', {'#','East (m)','North (m)','Up (m)','Depth (m)'});
+uGP = uigridlayout(uTabP, [1 1]); uGP.Padding = [2 2 2 2];
+tblPair = uitable(uGP, 'Data', [], 'RowName', {});
 
-edSeed = uieditfield(gArray,'numeric','Value',DEF.rngSeed,'Limits',[0 inf], ...
-    'RoundFractionalValues','on');
-edSeed.Layout.Row = r; edSeed.Layout.Column = 2;
-setTip(edSeed,"Initialises the random number generator used for random geometries and optimiser probes.");
-r = r + 1;
+%% ====================================================================
+%  TAB 2 - ENVIRONMENT
+%% ====================================================================
+gEnv = uigridlayout(tabEnv, [1 2]);
+gEnv.ColumnWidth = {470, '1x'};
+gEnv.Padding = [8 8 8 8];
+gEnv.ColumnSpacing = 10;
 
+gEnvL = uigridlayout(gEnv, [4 1]);
+gEnvL.Layout.Row = 1; gEnvL.Layout.Column = 1;
+gEnvL.RowHeight = {216, 268, 372, 112};
+gEnvL.Padding = [0 0 0 0];
+gEnvL.RowSpacing = 8;
+gEnvL.Scrollable = 'on';
 
-edSeed.ValueChangedFcn = @(~,~)markDirty("Seed changed");
+gBathy = mkPanelGrid(gEnvL, 'Bathymetry (optional)', 7, 1, 1, THEME.panelBg);
+lblBathy = addInfo(gBathy, 'No bathymetry loaded - flat bottom.', 2);
+addButtons(gBathy, {'Load bathymetry...','Flip depth sign','Clear'}, ...
+    {@(~,~)doLoadBathy(), @(~,~)doFlipBathy(), @(~,~)doClearBathy()}, true);
+addNum(gBathy, 'Flat-bottom water depth (m):', 'flatDepth', 1000, [1 11000], '%.1f', ...
+    'Water depth used everywhere when no bathymetry file is loaded.', false, 'env');
+addTxt(gBathy, 'Origin latitude (deg):', 'lat0', '', ...
+    'Geographic origin of the local x/y frame. Leave blank to use the centre of the first geographic file loaded.', 'env');
+addTxt(gBathy, 'Origin longitude (deg):', 'lon0', '', ...
+    'Geographic origin of the local x/y frame (decimal degrees, East positive).', 'env');
 
-% --- Array radius limit (Lmax) ---
-lbl = uilabel(gArray,'Text','Array radius limit (m):','FontWeight','bold','FontSize', LabelFontSize);
-lbl.Layout.Row = r; lbl.Layout.Column = 1;
+gSSP = mkPanelGrid(gEnvL, 'Sound speed', 9, 2, 1, THEME.mutedBg);
+addDrop(gSSP, 'Truth model (simulation):', 'sspModel', {'Constant','1-D profile (file)','3-D field (NCOM NetCDF)'}, 'Constant', ...
+    'Sound speed used to SIMULATE arrivals (the real ocean).', 'env');
+addNum(gSSP, 'Constant c (m/s):', 'c0', 1500, [1300 1700], '%.1f', 'Used when the truth model is Constant.', false, 'env');
+addButtons(gSSP, {'Load 1-D profile...','Load NCOM file...'}, {@(~,~)doLoadProfile(), @(~,~)doLoadNCOM()}, true);
+addNum(gSSP, 'NCOM time index:', 'ncomT', 1, [1 1e5], '%d', 'Time slice used from the NetCDF file (re-load after changing).', true, 'none');
+lblSSP = addInfo(gSSP, 'Constant sound speed.', 2);
+addDrop(gSSP, 'Localiser assumes:', 'locSSPMode', {'Constant c (below)','Environment profile at array','Ray-traced (profile at array)'}, 'Constant c (below)', ...
+    ['Sound speed / propagation the LOCALISER uses. A mismatch with the truth model shows up as localisation error. ' ...
+    'Ray-traced: the solver uses first-arrival times from rays traced through the profile at the array (accounts for refraction).'], 'loc');
+addNum(gSSP, 'Localiser c (m/s):', 'cLoc', 1500, [1300 1700], '%.1f', 'Constant sound speed assumed by the localiser.', false, 'loc');
 
-edLmax = uieditfield(gArray,'numeric','Value',DEF.Lmax,'Limits',[0.05 5], ...
-    'ValueDisplayFormat','%.3f');
-edLmax.Layout.Row = r; edLmax.Layout.Column = 2;
-setTip(edLmax,"Maximum allowed distance of any microphone from the array centre (arm length constraint).");
-r = r + 1;
+gProp = mkPanelGrid(gEnvL, 'Propagation, noise & detection', 13, 3, 1, THEME.panelBg);
+addDrop(gProp, 'Propagation model (truth):', 'propModel', {'Straight rays (fast)','Ray tracing (refraction, ducting, multipath)'}, ...
+    'Straight rays (fast)', ['Straight rays: travel time along the straight path through the sound-speed profile; TL from the spreading law. ' ...
+    'Ray tracing: Snell''s-law rays through the profile at the array with surface/bottom reflections; travel times, TL, shadow zones ' ...
+    'and multipath come from the eigenrays.'], 'env');
+addNum(gProp, 'Bottom loss per bounce (dB) [rays]:', 'BL', 6, [0 100], '%.1f', ...
+    'Reflection loss applied each time a ray reflects off the seafloor (depends on sediment and grazing angle; 0-15 dB typical at low frequency).', false, 'env');
+addDrop(gProp, 'Received arrivals [rays]:', 'rayArrivals', {'All eigenrays (multipath)','Strongest arrival only','First arrival only'}, ...
+    'All eigenrays (multipath)', ['All: every eigenray within 30 dB of the strongest is summed into the signal; SNR from the total received level. ' ...
+    'First / Strongest: the signal contains only that arrival and its SNR comes from that arrival alone (other paths treated as absent). ' ...
+    'Multipath can make the cross-correlation lock onto different paths on different hydrophones.'], 'env');
+addNum(gProp, 'Rays per launch direction:', 'nRays', 400, [50 5000], '%d', ...
+    'Angular resolution of the ray fan (0.05-89 deg, up and down). More rays = finer eigenrays, slower.', true, 'env');
+addDrop(gProp, 'SNR model:', 'snrMode', {'Sonar equation','Fixed SNR'}, 'Sonar equation', ...
+    'Sonar equation: SNR = SL - TL(r,f) - NL per hydrophone. Fixed: same SNR at every hydrophone and range.', 'env');
+addNum(gProp, 'Fixed SNR (dB):', 'snrFixed', 20, [-30 100], '%.1f', 'Used when SNR model = Fixed SNR.', false, 'env');
+addNum(gProp, 'Noise level NL (dB re 1 uPa, in band):', 'NL', 88, [0 200], '%.1f', ...
+    'Ambient noise level integrated over the call band (spectrum level + 10log10(bandwidth)).', false, 'env');
+addDrop(gProp, 'Spreading [straight rays]:', 'spreading', {'Hybrid (spherical then cylindrical)','Spherical (20 log r)','Practical (15 log r)','Cylindrical (10 log r)'}, ...
+    'Hybrid (spherical then cylindrical)', 'Geometric spreading law for transmission loss.', 'env');
+addNum(gProp, 'Transition range (m) [hybrid]:', 'transR', 1000, [1 1e5], '%.0f', ...
+    'Range where spreading changes from spherical to cylindrical (typically ~ water depth).', false, 'env');
+addChk(gProp, 'Include seawater absorption (Thorp)', 'absorption', true, 'Frequency-dependent absorption at the call centre frequency.', 'env');
+addNum(gProp, 'Detection threshold DT (dB):', 'DT', 10, [-30 100], '%.1f', ...
+    'A hydrophone only contributes a TDOA if its received SNR >= DT.', false, 'env');
+addNum(gProp, 'Min hydrophones detecting:', 'minDetect', 4, [3 64], '%d', ...
+    'Sources heard on fewer hydrophones are "undetected" (2-D solve needs >= 3, 3-D needs >= 4).', true, 'env');
 
-% --- Number of microphones ---
-lbl = uilabel(gArray,'Text','Number of microphones:','FontWeight','bold','FontSize', LabelFontSize);
-lbl.Layout.Row = r; lbl.Layout.Column = 1;
+gUnc = mkPanelGrid(gEnvL, 'Uncertainties', 3, 4, 1, THEME.mutedBg);
+addNum(gUnc, 'Clock / timing error sigma (ms):', 'timingMs', 0, [0 1e4], '%.3f', ...
+    'Random timing error added to every arrival (clock drift / sync error between recorders).', false, 'env');
+addNum(gUnc, 'Hydrophone position error sigma (m):', 'posSigma', 0, [0 1e4], '%.2f', ...
+    'Survey error: true positions differ from the positions the localiser uses.', false, 'env');
 
-edN = uieditfield(gArray,'numeric','Value',DEF.N,'Limits',[4 24], ...
-    'RoundFractionalValues','on');
-edN.Layout.Row = r; edN.Layout.Column = 2;
-setTip(edN,"Total number of microphones in the array (used for randomisation and validation).");
-r = r + 1;
+gEnvR = uigridlayout(gEnv, [3 2]);
+gEnvR.Layout.Row = 1; gEnvR.Layout.Column = 2;
+gEnvR.RowHeight = {'1.3x', '1x', '1x'};
+gEnvR.ColumnWidth = {'2x', '1x'};
+gEnvR.Padding = [0 0 0 0];
+axBathy = uiaxes(gEnvR); axBathy.Layout.Row = 1; axBathy.Layout.Column = 1;
+axSSP = uiaxes(gEnvR);   axSSP.Layout.Row = 1;   axSSP.Layout.Column = 2;
+axSNR = uiaxes(gEnvR);   axSNR.Layout.Row = 2;   axSNR.Layout.Column = [1 2];
+axRays = uiaxes(gEnvR);  axRays.Layout.Row = 3;  axRays.Layout.Column = [1 2];
 
-% --- Minimum mic spacing ---
-lbl = uilabel(gArray,'Text','Minimum mic spacing (m):','FontWeight','bold','FontSize', LabelFontSize);
-lbl.Layout.Row = r; lbl.Layout.Column = 1;
+%% ====================================================================
+%  TAB 3 - CALLS
+%% ====================================================================
+gCall = uigridlayout(tabCall, [1 2]);
+gCall.ColumnWidth = {470, '1x'};
+gCall.Padding = [8 8 8 8];
+gCall.ColumnSpacing = 10;
 
-edMinPair = uieditfield(gArray,'numeric','Value',DEF.minPairDist,'Limits',[0 5], ...
-    'ValueDisplayFormat','%.3f');
-edMinPair.Layout.Row = r; edMinPair.Layout.Column = 2;
-setTip(edMinPair,"Minimum allowed distance between any microphone pair (prevents clustering).");
-r = r + 1;
+gCallL = uigridlayout(gCall, [2 1]);
+gCallL.Layout.Row = 1; gCallL.Layout.Column = 1;
+gCallL.RowHeight = {432, '1x'};
+gCallL.Scrollable = 'on';
+gCallL.Padding = [0 0 0 0];
 
-% --- Minimum source-to-any-mic distance ---
-lbl = uilabel(gArray,'Text','Min source–mic distance (m):','FontWeight','bold','FontSize', LabelFontSize);
-lbl.Layout.Row = r; lbl.Layout.Column = 1;
+gCP = mkPanelGrid(gCallL, 'Call synthesis', 15, 1, 1, THEME.panelBg);
+addDrop(gCP, 'Preset:', 'callPreset', WhaleCallLibrary.presetNames(), 'Fin whale - 20 Hz pulse', ...
+    'Species preset (approximate). Choosing a preset fills in the fields below; you can then edit them.', 'preset');
+lblCallNote = addInfo(gCP, '', 2);
+addNum(gCP, 'Sample rate fs (Hz):', 'fs', 500, [20 1e6], '%.0f', ...
+    'Simulation sample rate. Must exceed twice the highest call frequency. Low rates keep long-range runs fast.', false, 'call');
+addNum(gCP, 'Call duration (s):', 'dur', 1, [1e-5 300], '%.4g', 'Length of the synthetic call (also used to stretch a frequency-contour template).', false, 'call');
+addNum(gCP, 'Start frequency (Hz):', 'f0', 23, [0.1 5e5], '%.6g', 'FM/tonal: start frequency. Pulse: lower band edge.', false, 'call');
+addNum(gCP, 'End frequency (Hz):', 'f1', 17, [0.1 5e5], '%.6g', 'FM: end frequency. Pulse: upper band edge. Ignored for tonal.', false, 'call');
+addDrop(gCP, 'Sweep shape:', 'sweep', {'linear','exponential'}, 'linear', 'Shape of the frequency sweep for FM calls.', 'call');
+addNum(gCP, 'Taper (%):', 'taper', 10, [0 100], '%.0f', 'Tukey window taper applied to the call envelope.', false, 'call');
+addNum(gCP, 'Source level SL (dB re 1 uPa @ 1 m):', 'SL', 189, [60 260], '%.1f', ...
+    'Used by the sonar equation (Environment tab) to compute received SNR.', false, 'env');
+addNum(gCP, 'Template sample rate (Hz, 0 = fs):', 'tplFs', 0, [0 1e6], '%.0f', ...
+    'Sample rate of an imported WAVEFORM template (ignored for .wav files, which carry their own rate).', false, 'call');
+addButtons(gCP, {'Import template...','Refresh preview'}, {@(~,~)doImportTemplate(), @(~,~)updateCall(true)}, true);
+lblTpl = addInfo(gCP, 'No template loaded.', 2);
+lblBand = addInfo(gCP, 'Band: ---', 1);
 
-edMinDistAny = uieditfield(gArray,'numeric','Value',DEF.minDistAny,'Limits',[0 5], ...
-    'ValueDisplayFormat','%.3f');
-edMinDistAny.Layout.Row = r; edMinDistAny.Layout.Column = 2;
-setTip(edMinDistAny,"Grid points closer than this to any mic are excluded (avoids near-field/degenerate cases).");
-r = r + 1;
+pCallHelp = uipanel(gCallL, 'Title', 'Template formats', 'FontWeight', 'bold');
+pCallHelp.Layout.Row = 2; pCallHelp.BackgroundColor = THEME.mutedBg;
+gCH = uigridlayout(pCallHelp, [1 1]);
+uilabel(gCH, 'WordWrap', 'on', 'VerticalAlignment', 'top', 'Text', ...
+    ['Import a single vector (e.g. 200 points) from .csv/.txt/.mat:' newline ...
+    '  - Frequency contour: values in Hz, spread evenly over the Call duration.' newline ...
+    '    Optional 2nd column = relative amplitude.' newline ...
+    '  - Waveform: pressure samples at the Template sample rate.' newline ...
+    'Or import a .wav clip of a real call (its own sample rate is used).' newline ...
+    'You will be asked which interpretation to use.']);
 
-% --- Field-of-Accuracy shell (outer radius) ---
-lbl = uilabel(gArray,'Text','FoA outer radius (m):','FontWeight','bold','FontSize', LabelFontSize);
-lbl.Layout.Row = r; lbl.Layout.Column = 1;
+gCallR = uigridlayout(gCall, [2 1]);
+gCallR.Layout.Row = 1; gCallR.Layout.Column = 2;
+gCallR.Padding = [0 0 0 0];
+axWave = uiaxes(gCallR); axWave.Layout.Row = 1;
+axSpec = uiaxes(gCallR); axSpec.Layout.Row = 2;
 
-edR = uieditfield(gArray,'numeric','Value',DEF.R,'Limits',[0.2 50], ...
-    'ValueDisplayFormat','%.2f');
-edR.Layout.Row = r; edR.Layout.Column = 2;
-setTip(edR,"Outer radius of the 3D evaluation shell (where accuracy is evaluated).");
-r = r + 1;
+%% ====================================================================
+%  TAB 4 - FIELD & OPTIMISE
+%% ====================================================================
+gFoA = uigridlayout(tabFoA, [1 2]);
+gFoA.ColumnWidth = {800, '1x'};
+gFoA.Padding = [8 8 8 8];
+gFoA.ColumnSpacing = 10;
 
-% --- Field-of-Accuracy inner radius ---
-lbl = uilabel(gArray,'Text','FoA inner radius (m):','FontWeight','bold','FontSize', LabelFontSize);
-lbl.Layout.Row = r; lbl.Layout.Column = 1;
+gFL = uigridlayout(gFoA, [3 2]);
+gFL.Layout.Row = 1; gFL.Layout.Column = 1;
+gFL.RowHeight = {346, 346, 270};
+gFL.Scrollable = 'on';
+gFL.ColumnWidth = {'1x', '1x'};
+gFL.Padding = [0 0 0 0];
+gFL.RowSpacing = 8; gFL.ColumnSpacing = 8;
 
-edRin = uieditfield(gArray,'numeric','Value',DEF.Rin,'Limits',[0 50], ...
-    'ValueDisplayFormat','%.2f');
-edRin.Layout.Row = r; edRin.Layout.Column = 2;
-setTip(edRin,"Inner exclusion radius; evaluation points inside this radius are not used (hollow shell).");
-r = r + 1;
+gFld = mkPanelGrid(gFL, 'Field of accuracy (synthetic sources)', 12, 1, 1, THEME.panelBg);
+addNum(gFld, 'Field centre East X (m):', 'fcx', 0, [-2e5 2e5], '%.1f', 'Centre of the study area (fixed in the world frame).', false, 'field');
+addNum(gFld, 'Field centre North Y (m):', 'fcy', 0, [-2e5 2e5], '%.1f', 'Centre of the study area.', false, 'field');
+addNum(gFld, 'Outer radius R (m):', 'R', 20000, [10 1e5], '%.0f', 'Sources are placed out to this horizontal distance from the field centre (max 100 km).', false, 'field');
+addNum(gFld, 'Inner radius Rin (m):', 'Rin', 0, [0 1e5], '%.0f', 'No sources inside this radius (0 = fill the disc).', false, 'field');
+addNum(gFld, 'Source spacing (m):', 'step', 2000, [1 5e4], '%.0f', ...
+    'Horizontal distance between neighbouring synthetic sources. Smaller = denser and slower.', false, 'field');
+addDrop(gFld, 'Layout:', 'layout', {'Cartesian grid','Polar rings'}, 'Cartesian grid', ...
+    'Cartesian: square grid. Polar: rings every "spacing" with ~"spacing" between sources along each ring.', 'field');
+addNum(gFld, 'Sector from (deg true):', 'azFrom', 0, [-360 720], '%.1f', 'Compass sector (clockwise from North). 0 to 360 = all directions.', false, 'field');
+addNum(gFld, 'Sector to (deg true):', 'azTo', 360, [-360 720], '%.1f', 'End of the compass sector (clockwise).', false, 'field');
+addTxt(gFld, 'Source depth(s) (m):', 'depths', '50', 'One depth or a comma-separated list, e.g. "20, 100, 500".', 'field');
+addNum(gFld, 'Min source-hydrophone dist (m):', 'minDistAny', 100, [0 1e5], '%.1f', 'Sources closer than this to any hydrophone are skipped.', false, 'field');
+lblGrid = addInfo(gFld, 'Sources: ---', 2);
 
-% --- Grid spacing ---
-lbl = uilabel(gArray,'Text','Grid spacing (m):','FontWeight','bold','FontSize', LabelFontSize);
-lbl.Layout.Row = r; lbl.Layout.Column = 1;
+gLoc = mkPanelGrid(gFL, 'Localisation & scoring', 12, 2, 1, THEME.mutedBg);
+addDrop(gLoc, 'Solve for:', 'solveMode', {'2-D (x,y) at assumed depth','3-D (x,y,z)'}, '2-D (x,y) at assumed depth', ...
+    '2-D is typical for near-planar seafloor arrays; 3-D needs depth aperture and >= 4 detecting hydrophones.', 'loc');
+addNum(gLoc, 'Assumed source depth (m) [2-D]:', 'assumedDepth', 50, [0 11000], '%.1f', ...
+    'Depth assumed by the 2-D solver when "known depth" is off. Set it different from the true depth to test depth-mismatch error.', false, 'loc');
+addChk(gLoc, '2-D solver knows each source''s true depth', 'useTrueDepth', true, ...
+    'On: the 2-D solve uses the true source depth (isolates horizontal geometry). Off: uses the assumed depth above for every source.', 'loc');
+addDrop(gLoc, 'TDOA method:', 'tdoaMethod', {'Waveform cross-correlation','Envelope cross-correlation'}, 'Waveform cross-correlation', ...
+    'Envelope correlation is more robust for narrowband tonal calls but less precise.', 'loc');
+addDrop(gLoc, 'Score on:', 'scoreMetric', {'Horizontal error','3-D error'}, 'Horizontal error', 'Error used for pass/fail and the optimiser score.', 'loc');
+addDrop(gLoc, 'Undetected sources:', 'undetPolicy', {'Count as failures','Exclude from score'}, 'Count as failures', ...
+    'Whether sources heard on too few hydrophones count against the pass rate.', 'loc');
+addNum(gLoc, 'Target error (m):', 'best', 100, [0.01 1e6], '%.2f', 'Desired localisation error.', false, 'loc');
+addNum(gLoc, 'Tolerance margin (m):', 'tol', 50, [0 1e6], '%.2f', 'Pass threshold = Target error + Tolerance.', false, 'loc');
+addNum(gLoc, 'Mean-error weight (lambda):', 'lambda', 0.15, [0 10], '%.3f', 'J = passRate - lambda * min(meanErr / penalty, 1).', false, 'loc');
+addNum(gLoc, 'Failure penalty (m):', 'failPen', 5000, [1 1e7], '%.0f', 'Error assigned to failed/undetected sources (also caps errors).', false, 'loc');
+addNum(gLoc, 'Random seed:', 'seed', 1, [0 2^31-2], '%d', 'Seeds noise, clock and position-error realisations (same noise for every candidate geometry).', true, 'loc');
+addChk(gLoc, 'Use parallel pool (Parallel Computing Toolbox)', 'useParallel', false, 'Evaluates sources in parallel with parfor. No progress updates while running.', 'none');
 
-edStep = uieditfield(gArray,'numeric','Value',DEF.step ,'Limits',[0.05 5], ...
-    'ValueDisplayFormat','%.2f');
-edStep.Layout.Row = r; edStep.Layout.Column = 2;
-setTip(edStep,"Spacing of the 3D evaluation grid (smaller = denser grid, slower evaluation).");
-r = r + 1;
+gOpt = mkPanelGrid(gFL, 'Optimiser (WAH-i)', 9, 3, 1, THEME.panelBg);
+addNum(gOpt, 'Max iterations:', 'maxIters', 25, [1 5000], '%d', 'One hydrophone is perturbed per iteration.', true, 'opt');
+addNum(gOpt, 'Probes per hydrophone:', 'probes', 8, [1 16], '%d', 'Number of directions tried per iteration (plus 2 radial).', true, 'opt');
+addNum(gOpt, 'Initial step fraction:', 'initStep', 0.25, [0 1], '%.3f', 'Step = fraction x Lmax, decreasing linearly over iterations.', false, 'opt');
+addNum(gOpt, 'Minimum step fraction:', 'minStep', 0.03, [0 1], '%.3f', 'Lower bound on the step fraction.', false, 'opt');
+addNum(gOpt, 'Stall limit:', 'stall', 12, [1 1e4], '%d', 'Non-improving iterations before a shake/reset.', true, 'opt');
+addNum(gOpt, 'Shake fraction:', 'shake', 0.08, [0 1], '%.3f', 'Shake magnitude as a fraction of Lmax.', false, 'opt');
+addNum(gOpt, 'Min improvement (dJ):', 'epsJ', 1e-6, [0 1], '%.1e', 'Minimum score gain to accept a move.', false, 'opt');
+addNum(gOpt, 'Target pass rate:', 'targetPass', 0.95, [0 1], '%.2f', 'Stop early at this pass rate.', false, 'opt');
+addDrop(gOpt, 'Moves:', 'moveMode', {'Horizontal (x,y) only','3-D (x,y,z)'}, 'Horizontal (x,y) only', ...
+    'Seafloor arrays normally only move horizontally.', 'opt');
 
-% --- Near-field epsilon distance ---
-lbl = uilabel(gArray,'Text','Near-field epsilon (m):','FontWeight','bold','FontSize', LabelFontSize);
-lbl.Layout.Row = r; lbl.Layout.Column = 1;
-
-edEps = uieditfield(gArray,'numeric','Value',DEF.epsDist ,'Limits',[0 5], ...
-    'ValueDisplayFormat','%.3f');
-edEps.Layout.Row = r; edEps.Layout.Column = 2;
-setTip(edEps,"If a source point is within epsilon of any mic, a penalty is applied (prevents singularities).");
-r = r + 1;
-
-% --- Target error (best) ---
-lbl = uilabel(gArray,'Text','Target error (cm):','FontWeight','bold','FontSize', LabelFontSize);
-lbl.Layout.Row = r; lbl.Layout.Column = 1;
-
-edBest = uieditfield(gArray,'numeric','Value',DEF.best_cm,'Limits',[0.1 1e5], ...
-    'ValueDisplayFormat','%.1f');
-edBest.Layout.Row = r; edBest.Layout.Column = 2;
-setTip(edBest,"Desired localisation error threshold (base) in centimetres.");
-r = r + 1;
-
-% --- Tolerance margin ---
-lbl = uilabel(gArray,'Text','Tolerance margin (cm):','FontWeight','bold','FontSize', LabelFontSize);
-lbl.Layout.Row = r; lbl.Layout.Column = 1;
-
-edTol = uieditfield(gArray,'numeric','Value',DEF.tol_cm,'Limits',[0 1e5], ...
-    'ValueDisplayFormat','%.1f');
-edTol.Layout.Row = r; edTol.Layout.Column = 2;
-setTip(edTol,"Added margin for pass/fail threshold: threshold = Target error + Tolerance.");
-r = r + 1;
-
-% --- Mean-error weight (lambda) ---
-lbl = uilabel(gArray,'Text','Mean-error weight (λ):','FontWeight','bold','FontSize', LabelFontSize);
-lbl.Layout.Row = r; lbl.Layout.Column = 1;
-
-edLambda = uieditfield(gArray,'numeric','Value',DEF.lambdaMean,'Limits',[0 10], ...
-    'ValueDisplayFormat','%.3f');
-edLambda.Layout.Row = r; edLambda.Layout.Column = 2;
-setTip(edLambda,"Weight of mean error term in the optimiser score J = passRate − λ·(meanErr/penalty).");
-r = r + 1;
-
-% --- Failure penalty ---
-lbl = uilabel(gArray,'Text','Failure penalty (cm):','FontWeight','bold','FontSize', LabelFontSize);
-lbl.Layout.Row = r; lbl.Layout.Column = 1;
-
-edFailPen = uieditfield(gArray,'numeric','Value',DEF.failPen_cm,'Limits',[10 1e7], ...
-    'ValueDisplayFormat','%.0f');
-edFailPen.Layout.Row = r; edFailPen.Layout.Column = 2;
-setTip(edFailPen,"Assigned error (cm) for failed/singular points so they count against the solution.");
-% r ends at 12
-
-edLmax.ValueChangedFcn      = @(~,~)onLmaxChanged();
-edN.ValueChangedFcn         = @(~,~)markDirty("Mic count changed");
-edMinPair.ValueChangedFcn   = @(~,~)markDirty("Array/Field changed");
-edMinDistAny.ValueChangedFcn= @(~,~)markDirty("Array/Field changed");
-edR.ValueChangedFcn         = @(~,~)markDirty("Array/Field changed");
-edRin.ValueChangedFcn       = @(~,~)markDirty("Array/Field changed");
-edStep.ValueChangedFcn      = @(~,~)markDirty("Array/Field changed");
-edEps.ValueChangedFcn       = @(~,~)markDirty("Array/Field changed");
-edBest.ValueChangedFcn      = @(~,~)markDirty("Threshold changed");
-edTol.ValueChangedFcn       = @(~,~)markDirty("Threshold changed");
-edLambda.ValueChangedFcn    = @(~,~)markDirty("Scoring changed");
-edFailPen.ValueChangedFcn   = @(~,~)markDirty("Scoring changed");
-
-%% ==================== Optimiser Parameters (single-column, unchanged variables) ====================
-pOpt = uipanel(gLeft,'Title','Optimiser Parameters','FontWeight','bold','FontSize',LabelFontSize);
-pOpt.Layout.Row = 2;
-pOpt.Layout.Column = 1;
-pOpt.BackgroundColor = THEME.mutedBg;
-
-
-gOpt = uigridlayout(pOpt,[8 2]);
-gOpt.RowHeight      = repmat({20},1,8);
-gOpt.ColumnWidth    = {200,'1x'};
-gOpt.Padding        = [10 10 10 10];
-gOpt.RowSpacing     = 6;
-gOpt.ColumnSpacing  = 8;
-gOpt.Scrollable = 'on';
-r2 = 1;
-
-lbl = uilabel(gOpt,'Text','Max iterations:','FontWeight','bold','FontSize',LabelFontSize);
-lbl.Layout.Row = r2; lbl.Layout.Column = 1;
-edMaxIters = uieditfield(gOpt,'numeric','Value',DEF.maxIters,'Limits',[1 5000],'RoundFractionalValues','on');
-edMaxIters.Layout.Row = r2; edMaxIters.Layout.Column = 2;
-setTip(edMaxIters,"Maximum optimisation iterations (one mic perturbed per iteration).");
-r2 = r2 + 1;
-
-lbl = uilabel(gOpt,'Text','Probes per mic:','FontWeight','bold','FontSize',LabelFontSize);
-lbl.Layout.Row = r2; lbl.Layout.Column = 1;
-edProbes = uieditfield(gOpt,'numeric','Value',DEF.probes,'Limits',[1 64],'RoundFractionalValues','on');
-edProbes.Layout.Row = r2; edProbes.Layout.Column = 2;
-setTip(edProbes,"Number of direction probes tested for the selected mic per iteration.");
-r2 = r2 + 1;
-
-lbl = uilabel(gOpt,'Text','Initial step fraction:','FontWeight','bold','FontSize',LabelFontSize);
-lbl.Layout.Row = r2; lbl.Layout.Column = 1;
-edInitStep = uieditfield(gOpt,'numeric','Value',DEF.initStep,'Limits',[0 1],'ValueDisplayFormat','%.3f');
-edInitStep.Layout.Row = r2; edInitStep.Layout.Column = 2;
-setTip(edInitStep,"Initial probe step size as a fraction of Lmax (step = frac·Lmax).");
-r2 = r2 + 1;
-
-lbl = uilabel(gOpt,'Text','Minimum step fraction:','FontWeight','bold','FontSize',LabelFontSize);
-lbl.Layout.Row = r2; lbl.Layout.Column = 1;
-edMinStep = uieditfield(gOpt,'numeric','Value',DEF.minStep,'Limits',[0 1],'ValueDisplayFormat','%.3f');
-edMinStep.Layout.Row = r2; edMinStep.Layout.Column = 2;
-setTip(edMinStep,"Lower bound on step fraction (prevents steps becoming too small late in optimisation).");
-r2 = r2 + 1;
-
-lbl = uilabel(gOpt,'Text','Stall limit:','FontWeight','bold','FontSize',LabelFontSize);
-lbl.Layout.Row = r2; lbl.Layout.Column = 1;
-edStall = uieditfield(gOpt,'numeric','Value',DEF.stall,'Limits',[1 1e4],'RoundFractionalValues','on');
-edStall.Layout.Row = r2; edStall.Layout.Column = 2;
-setTip(edStall,"Number of consecutive non-improving iterations before a shake/reset is triggered.");
-r2 = r2 + 1;
-
-lbl = uilabel(gOpt,'Text','Shake fraction:','FontWeight','bold','FontSize',LabelFontSize);
-lbl.Layout.Row = r2; lbl.Layout.Column = 1;
-edShake = uieditfield(gOpt,'numeric','Value',DEF.shake,'Limits',[0 1],'ValueDisplayFormat','%.3f');
-edShake.Layout.Row = r2; edShake.Layout.Column = 2;
-setTip(edShake,"Shake magnitude as fraction of Lmax (adds jitter to escape local minima).");
-r2 = r2 + 1;
-
-lbl = uilabel(gOpt,'Text','Min improvement (ΔJ):','FontWeight','bold','FontSize',LabelFontSize);
-lbl.Layout.Row = r2; lbl.Layout.Column = 1;
-edEpsJ = uieditfield(gOpt,'numeric','Value',DEF.epsJ,'Limits',[0 1],'ValueDisplayFormat','%.1e');
-edEpsJ.Layout.Row = r2; edEpsJ.Layout.Column = 2;
-setTip(edEpsJ,"Minimum score improvement required to accept a candidate geometry.");
-r2 = r2 + 1;
-
-lbl = uilabel(gOpt,'Text','Target pass rate:','FontWeight','bold','FontSize',LabelFontSize);
-lbl.Layout.Row = r2; lbl.Layout.Column = 1;
-edTargetPass = uieditfield(gOpt,'numeric','Value',DEF.targetPass,'Limits',[0 1],'ValueDisplayFormat','%.2f');
-edTargetPass.Layout.Row = r2; edTargetPass.Layout.Column = 2;
-setTip(edTargetPass,"Stop early once pass rate reaches this threshold.");
-% r2 ends at 8
-
-edMaxIters.ValueChangedFcn  = @(~,~)markDirty("Optimiser changed");
-edProbes.ValueChangedFcn    = @(~,~)markDirty("Optimiser changed");
-edInitStep.ValueChangedFcn  = @(~,~)markDirty("Optimiser changed");
-edMinStep.ValueChangedFcn   = @(~,~)markDirty("Optimiser changed");
-edStall.ValueChangedFcn     = @(~,~)markDirty("Optimiser changed");
-edShake.ValueChangedFcn     = @(~,~)markDirty("Optimiser changed");
-edEpsJ.ValueChangedFcn      = @(~,~)markDirty("Optimiser changed");
-edTargetPass.ValueChangedFcn= @(~,~)markDirty("Optimiser changed");
-
-%% ==================== Call Synthesis Parameters (moved BELOW optimiser) ====================
-pCall = uipanel(gLeft,'Title','Call Synthesis Parameters','FontWeight','bold','FontSize',LabelFontSize);
-pCall.Layout.Row = 3;
-pCall.Layout.Column = 1;
-pCall.BackgroundColor = THEME.mutedBg;
-pCall.Scrollable = 'on';
-
-% 7 rows: fs, d, f0, f1, SNR, Tail, Call type
-gCall = uigridlayout(pCall,[7 2]);
-gCall.RowHeight      = repmat({20},1,7);
-gCall.ColumnWidth    = {200,'1x'};
-gCall.Padding        = [10 10 10 10];
-gCall.RowSpacing     = 6;
-gCall.ColumnSpacing  = 8;
-
-rc = 1;
-
-lbl = uilabel(gCall,'Text','Sample rate (Hz):','FontWeight','bold','FontSize',LabelFontSize);
-lbl.Layout.Row = rc; lbl.Layout.Column = 1;
-edFs = uieditfield(gCall,'numeric','Value',DEF.fs,'Limits',[8000 1e6],'RoundFractionalValues','on');
-edFs.Layout.Row = rc; edFs.Layout.Column = 2;
-setTip(edFs,"Sampling rate used to synthesise calls and simulate microphone signals.");
-rc = rc + 1;
-
-lbl = uilabel(gCall,'Text','Call duration (ms):','FontWeight','bold','FontSize',LabelFontSize);
-lbl.Layout.Row = rc; lbl.Layout.Column = 1;
-edDur = uieditfield(gCall,'numeric','Value',DEF.dur_ms,'Limits',[0.1 200],'ValueDisplayFormat','%.2f');
-edDur.Layout.Row = rc; edDur.Layout.Column = 2;
-setTip(edDur,"Call length in milliseconds (converted to seconds internally).");
-rc = rc + 1;
-
-lbl = uilabel(gCall,'Text','Start frequency f0 (Hz):','FontWeight','bold','FontSize',LabelFontSize);
-lbl.Layout.Row = rc; lbl.Layout.Column = 1;
-edF0 = uieditfield(gCall,'numeric','Value',DEF.f0,'Limits',[1 3e5],'RoundFractionalValues','on');
-edF0.Layout.Row = rc; edF0.Layout.Column = 2;
-setTip(edF0,"Higher frequency of the sweep (FM) or carrier for CF call type.");
-rc = rc + 1;
-
-lbl = uilabel(gCall,'Text','End frequency f1 (Hz):','FontWeight','bold','FontSize',LabelFontSize);
-lbl.Layout.Row = rc; lbl.Layout.Column = 1;
-edF1 = uieditfield(gCall,'numeric','Value',DEF.f1,'Limits',[1 3e5],'RoundFractionalValues','on');
-edF1.Layout.Row = rc; edF1.Layout.Column = 2;
-setTip(edF1,"Lower frequency of FM sweep (ignored for CF call type).");
-rc = rc + 1;
-
-lbl = uilabel(gCall,'Text','SNR (dB):','FontWeight','bold','FontSize',LabelFontSize);
-lbl.Layout.Row = rc; lbl.Layout.Column = 1;
-edSNR = uieditfield(gCall,'numeric','Value',DEF.snr_db,'Limits',[-30 100],'ValueDisplayFormat','%.1f');
-edSNR.Layout.Row = rc; edSNR.Layout.Column = 2;
-setTip(edSNR,"Signal-to-noise ratio injected into simulated microphone signals.");
-rc = rc + 1;
-
-lbl = uilabel(gCall,'Text','Envelope tail (%):','FontWeight','bold','FontSize',LabelFontSize);
-lbl.Layout.Row = rc; lbl.Layout.Column = 1;
-edTail = uieditfield(gCall,'numeric','Value',DEF.tail_pct,'Limits',[0 200],'ValueDisplayFormat','%.0f');
-edTail.Layout.Row = rc; edTail.Layout.Column = 2;
-setTip(edTail,"Percentage of duration used to pad the synthesised signal. Always ensure the maximum delay from a distant source covers simulated shifts. Larger tails increase computational cost.");
-rc = rc + 1;
-
-lbl = uilabel(gCall,'Text','Call type:','FontWeight','bold','FontSize',LabelFontSize);
-lbl.Layout.Row = rc; lbl.Layout.Column = 1;
-ddCallType = uidropdown(gCall,'Items',{'FM','CF'},'Value',DEF.callType);
-ddCallType.Layout.Row = rc; ddCallType.Layout.Column = 2;
-setTip(ddCallType,"FM = frequency-modulated sweep; CF = constant-frequency tone.");
-
-edFs.ValueChangedFcn        = @(~,~)markDirty("Call synthesis changed");
-edDur.ValueChangedFcn       = @(~,~)markDirty("Call synthesis changed");
-edF0.ValueChangedFcn        = @(~,~)markDirty("Call synthesis changed");
-edF1.ValueChangedFcn        = @(~,~)markDirty("Call synthesis changed");
-edSNR.ValueChangedFcn       = @(~,~)markDirty("Call synthesis changed");
-edTail.ValueChangedFcn      = @(~,~)markDirty("Call synthesis changed");
-ddCallType.ValueChangedFcn  = @(~,~)markDirty("Call synthesis changed");
-
-%% ==================== Workflow Actions ====================
-pAct = uipanel(gLeft,'Title','Workflow Actions','FontWeight','bold','FontSize',LabelFontSize);
-pAct.Layout.Row = 3;
-pAct.BackgroundColor = THEME.panelAlt;
-pAct.Layout.Row  = 3; pAct.Layout.Column  = 2;
-
-% Outer grid to vertically centre content
-gActOuter = uigridlayout(pAct,[3 1]);
-gActOuter.RowHeight = {'fit','fit','fit'};   % top spacer | buttons | bottom spacer
-gActOuter.ColumnWidth = {'1x'};
-gActOuter.Padding = [10 10 10 10];
-
-% Inner grid = your actual buttons
-gAct = uigridlayout(gActOuter,[4 3]);
-gAct.Layout.Row = 2;    % MIDDLE ROW → centred vertically
-gAct.RowHeight = {34, 34, 34, 34};
+pAct = uipanel(gFL, 'Title', 'Workflow', 'FontWeight', 'bold');
+pAct.Layout.Row = 1; pAct.Layout.Column = 2; pAct.BackgroundColor = THEME.panelAlt;
+gAct = uigridlayout(pAct, [6 3]);
+gAct.RowHeight = {34, 34, 30, 30, 30, '1x'};
 gAct.ColumnWidth = {'1x','1x','1x'};
-gAct.RowSpacing = 6;
-gAct.ColumnSpacing = 8;
+gAct.Padding = [8 8 8 8]; gAct.RowSpacing = 6; gAct.ColumnSpacing = 6;
+btnRun = mkBtn(gAct, '1  Evaluate field (WAH)', @(~,~)doRunWAH(), 1, [1 3], true, ...
+    'Simulate every synthetic source with the current array and environment.');
+btnOpt = mkBtn(gAct, '2  Optimise geometry (WAH-i)', @(~,~)doOptimiser(), 2, [1 3], true, ...
+    'Iteratively move hydrophones to improve the pass rate.');
+btnStop = mkBtn(gAct, 'Stop', @(~,~)doStop(), 3, 1, false, 'Stop the running evaluation / optimisation / sweep.');
+btnStop.Enable = 'off';
+btnReport = mkBtn(gAct, 'Report', @(~,~)doReport(), 3, 2, false, 'Before/after report for the last optimisation run.');
+btnReport.Enable = 'off';
+btnExportRun = mkBtn(gAct, 'Export run (.mat)', @(~,~)doExportRun(), 3, 3, false, 'Save the run history H and runInfo.');
+btnExportRun.Enable = 'off';
+mkBtn(gAct, 'Export results CSV', @(~,~)doExportResults(), 4, 1, false, 'Per-source errors, SNR and detections of the last evaluation.');
+mkBtn(gAct, 'Inspect a source...', @(~,~)doInspect(), 4, 2, false, 'Simulate one source and view the received signals and estimate.');
+btnExportWS = mkBtn(gAct, 'Export workspace', @(~,~)doExportWorkspace(), 4, 3, false, 'Assign results to the MATLAB base workspace.');
+if IS_DEPLOYED, btnExportWS.Enable = 'off'; end
+mkBtn(gAct, 'Save session...', @(~,~)doSaveSession(), 5, 1, false, 'Save every setting, the array, bathymetry, SSP and template.');
+mkBtn(gAct, 'Load session...', @(~,~)doLoadSession(), 5, 2, false, 'Restore a saved session.');
+mkBtn(gAct, 'Export geometry CSV...', @(~,~)doExportGeometry(), 5, 3, false, 'Same as Export CSV on the Array Design tab.');
+lblStats = uilabel(gAct, 'Text', 'No results yet.', 'WordWrap', 'on', 'VerticalAlignment', 'top', 'FontSize', 12);
+lblStats.Layout.Row = 6; lblStats.Layout.Column = [1 3];
 
-btnRand = uibutton(gAct,'Text','1 Random Config ♯','FontWeight','bold','FontSize',LabelFontSize,'ButtonPushedFcn',@(~,~)doRandomise());
-btnRand.BackgroundColor = THEME.accentColor;
-btnRand.FontColor = [1 1 1];
-setTip(btnRand, "Generate a random array configuuration for N mics");
-btnRand.Layout.Row = 1; btnRand.Layout.Column = 1;
+gSw = mkPanelGrid(gFL, 'Array position & orientation sweep', 8, 2, 2, THEME.mutedBg);
+addDrop(gSw, 'Candidate origins:', 'sweepArea', {'Within the field (radius R)','Around current origin'}, 'Within the field (radius R)', ...
+    'Where to try placing the array (same geometry, translated).', 'none');
+addNum(gSw, 'Sweep radius (m) [around origin]:', 'sweepR', 10000, [0 1e5], '%.0f', 'Radius of candidate origins around the current origin.', false, 'none');
+addNum(gSw, 'Sweep spacing (m):', 'sweepStep', 5000, [1 1e5], '%.0f', 'Spacing between candidate array origins.', false, 'none');
+addTxt(gSw, 'Yaw angles to try (deg):', 'sweepYaw', '', ...
+    'Optional comma-separated yaw angles, e.g. "0, 30, 60". Blank = keep the current yaw. Each position is evaluated at every yaw.', 'none');
+addDrop(gSw, 'Rank by:', 'sweepRank', {'Pass rate','Median error'}, 'Pass rate', 'How the best position is chosen.', 'none');
+addButtons(gSw, {'Run sweep','Apply best','Export sweep CSV'}, ...
+    {@(~,~)doSweep(), @(~,~)doApplyBestSweep(), @(~,~)doExportSweep()}, true);
+lblSweep = addInfo(gSw, 'Re-runs the evaluation with the array moved to each candidate origin.', 2);
 
-btnLoad = uibutton(gAct,'Text','Load Config ⬆','FontWeight','bold','FontSize',10,'ButtonPushedFcn',@(~,~)doLoadGeometry());
-btnLoad.BackgroundColor = THEME.secondaryBtn;
-btnLoad.FontColor = THEME.textColor;
-setTip(btnLoad, "Get microphone array configirations from a 3XN CSV file. Overrides Lmax and N");
-btnLoad.Layout.Row = 1; btnLoad.Layout.Column = 2;
+gDisp = mkPanelGrid(gFL, 'Display', 7, 3, 2, THEME.panelBg);
+addDrop(gDisp, 'Colour by:', 'dispMetric', {'Score error (m)','Horizontal error (m)','3-D error (m)','Depth error (m)', ...
+    'Bearing error (deg)','Min. SNR (dB)','# hydrophones detecting','Pass / fail','Sweep: pass rate (%)','Sweep: median error (m)'}, ...
+    'Score error (m)', 'Quantity shown on the map.', 'disp');
+addDrop(gDisp, 'View:', 'viewMode', {'Plan (map)','3-D'}, 'Plan (map)', 'Plan view or 3-D view with the seafloor surface.', 'disp');
+addDrop(gDisp, 'Depth layer:', 'dispLayer', {'All depths'}, 'All depths', 'Which source-depth layer to show.', 'disp');
+addNum(gDisp, 'Vertical exaggeration (3-D):', 'VE', 10, [0.1 1000], '%.1f', 'Vertical exaggeration of the 3-D view.', false, 'disp');
+addNum(gDisp, 'Colour limit (0 = auto):', 'cmax', 0, [0 1e7], '%.1f', 'Upper colour limit; auto = 2 x threshold for errors.', false, 'disp');
+addChk(gDisp, 'Show bathymetry', 'showBathy', true, 'Contours (plan) or seafloor surface (3-D).', 'disp');
+addChk(gDisp, 'Label hydrophones', 'showLabels', true, 'Show H1..HN labels.', 'disp');
 
-btnSaveCSV = uibutton(gAct,'Text','Save Config ⬇','FontSize',LabelFontSize,'ButtonPushedFcn',@(~,~)doSaveGeometry());
-btnSaveCSV.BackgroundColor = THEME.secondaryBtn;
-btnSaveCSV.FontColor = THEME.textColor;
-setTip(btnSaveCSV, "Export the current micrphone geometry to a 3XN CSV file.")
-btnSaveCSV.Layout.Row = 1; btnSaveCSV.Layout.Column = 3;
+pFR = uipanel(gFoA, 'Title', 'FIELD OF ACCURACY', 'FontWeight', 'bold');
+pFR.Layout.Row = 1; pFR.Layout.Column = 2; pFR.BackgroundColor = THEME.panelBg;
+gFR = uigridlayout(pFR, [1 1]); gFR.Padding = [6 6 6 6];
+axF = uiaxes(gFR);
 
-btnRun = uibutton(gAct,'Text','2 Run WAH ▶︎','FontWeight','bold','FontSize',LabelFontSize,'ButtonPushedFcn',@(~,~)doRunWAH());
-btnRun.BackgroundColor = THEME.accentColor;
-btnRun.FontColor = [1 1 1];
-setTip(btnRun, "Run the Widefield Acoustics Heuristic algorithm. Estimates the FoA for the current array geometry.");
-btnRun.Layout.Row = 2; btnRun.Layout.Column = [1 3];
+%% -------------------- Initialise --------------------
+applyPreset(true);
+S.M = HydrophoneGeometry.pattern(CTRL.patName.Value, patternOpts());
+refreshAll();
+updateStatus('Ready. Design an array (tab 1), set the environment (tab 2) and calls (tab 3), then evaluate (tab 4).');
 
-btnOpt = uibutton(gAct,'Text','3 Optimise ᯓ★','FontWeight','bold','FontSize',LabelFontSize,'ButtonPushedFcn',@(~,~)doOptimiser());
-btnOpt.BackgroundColor = THEME.accentColor;
-btnOpt.FontColor = [1 1 1];
-setTip(btnOpt, "Apply the WAH-i algorithm to current array geometry.");
-btnOpt.Layout.Row = 3; btnOpt.Layout.Column = [1 3];
-
-btnStop = uibutton(gAct,'Text','Stop ⏹','FontSize',LabelFontSize,'Enable','off','ButtonPushedFcn',@(~,~)doStop());
-btnStop.BackgroundColor = THEME.secondaryBtn;
-btnStop.FontColor = THEME.textColor;
-setTip(btnStop, "Stop the optimiser. Finishes the run before stopping, takes time.");
-btnStop.Layout.Row = 4; btnStop.Layout.Column = 1;
-
-btnExportRun = uibutton(gAct,'Text','Export Run ➜]','FontSize',LabelFontSize,'ButtonPushedFcn',@(~,~)doExportRun(), ...
-    'Enable','off');btnExportRun.BackgroundColor = THEME.secondaryBtn;
-btnExportRun.FontColor = THEME.textColor;
-setTip(btnExportRun, "Save the optimiser run log to a .mat file for further analyses via Matlab.");
-btnExportRun.Layout.Row = 4; btnExportRun.Layout.Column = 2;
-
-btnReport = uibutton(gAct,'Text','Report ℹ','FontSize',LabelFontSize,'ButtonPushedFcn',@(~,~)doReport(), ...
-    'Enable','off');btnReport.BackgroundColor = THEME.secondaryBtn;
-btnReport.FontColor = THEME.textColor;
-setTip(btnReport, "See the report for the current optimisation session.");
-btnReport.Layout.Row = 4; btnReport.Layout.Column = 3;
-
-%% ==================== Mic Editor ====================
-pMic = uipanel(gLeft,'Title','Manual Management','FontWeight','bold','FontSize',LabelFontSize);
-pMic.BackgroundColor = THEME.panelBg;
-pMic.Layout.Row  = 1;          % keep as you had
-pMic.Layout.Column = 2;
-
-% --- OUTER container: placement area + bottom buttons area ---
-gMicOuter = uigridlayout(pMic,[2 1]);
-gMicOuter.RowHeight = {'1x','fit'};   % top grows, bottom stays snug
-gMicOuter.ColumnWidth = {'1x'};
-gMicOuter.Padding = [10 10 10 10];
-gMicOuter.RowSpacing = 10;
-
-% ==================== (A) Placement area ====================
-pMicPlace = uipanel(gMicOuter,'Title','Microphone Placement','FontWeight','bold','FontSize',LabelFontSize);
-pMicPlace.Layout.Row = 1;
-pMicPlace.BackgroundColor = THEME.panelAlt;
-
-gMic = uigridlayout(pMicPlace,[6 4]);               % <-- ONLY the placement rows
-gMic.RowHeight = {20, 22, 22, 22, 22, 18};          % Mic row + X/Y/Z + Tip + spare
-gMic.ColumnWidth = {60, 120, '3x', '1x'};
-gMic.Padding = [10 10 10 10];
-gMic.RowSpacing = 18;
-gMic.ColumnSpacing = 8;
-
-rr = 1;
-
-% Selected Mic + recenter
-lbl = uilabel(gMic); lbl.Text = 'Mic:'; lbl.FontWeight = 'bold'; lbl.FontSize = 10;
-lbl.Layout.Row = rr; lbl.Layout.Column = 1;
-
-ddMic = uidropdown(gMic,'Items',compose('%d',1:edN.Value),'Value','1', ...
-    'ValueChangedFcn',@(~,~)syncMicToControls());
-ddMic.Layout.Row = rr; ddMic.Layout.Column = 2;
-
-btnRecenter = uibutton(gMic,'Text','Re-centre','FontSize',9,'ButtonPushedFcn',@(~,~)recenterArray());
-btnRecenter.Layout.Row = rr; btnRecenter.Layout.Column = [3 4];
-btnRecenter.BackgroundColor = THEME.secondaryBtn;
-btnRecenter.FontColor = THEME.textColor;
-rr = rr + 1;
-
-% X
-lbl = uilabel(gMic); lbl.Text = 'X (m):'; lbl.FontWeight = 'bold'; lbl.FontSize = 10;
-lbl.Layout.Row = rr; lbl.Layout.Column = 1;
-
-edX = uieditfield(gMic,'numeric','Value',0,'ValueDisplayFormat','%.4f');
-edX.Layout.Row = rr; edX.Layout.Column = 2;
-
-slX = uislider(gMic,'Limits',[-edLmax.Value edLmax.Value],'Value',0);
-slX.Layout.Row = rr; slX.Layout.Column = [3 4];
-slX.FontSize  = 6;
-slX.FontColor = THEME.accentColor;
-updateSliderLimits();   % sets Limits
-% Clear ticks/labels so sliders show no tick marks or labels
-try
-    slX.MajorTicks = [];
-    slX.MajorTickLabels = {};
-catch
-end
-drawnow;                % forces first paint
-
-rr = rr + 1;
-
-% Y
-lbl = uilabel(gMic); lbl.Text = 'Y (m):'; lbl.FontWeight = 'bold'; lbl.FontSize = 10;
-lbl.Layout.Row = rr; lbl.Layout.Column = 1;
-
-edY = uieditfield(gMic,'numeric','Value',0,'ValueDisplayFormat','%.4f');
-edY.Layout.Row = rr; edY.Layout.Column = 2;
-
-slY = uislider(gMic,'Limits',[-edLmax.Value edLmax.Value],'Value',0);
-slY.FontSize  = 6;
-slY.FontColor = THEME.accentColor;
-slY.Layout.Row = rr; slY.Layout.Column = [3 4];
-updateSliderLimits();   % sets Limits
-try
-    slY.MajorTicks = [];
-    slY.MajorTickLabels = {};
-catch
-end
-drawnow;                % forces first paint
-rr = rr + 1;
-
-% Z
-lbl = uilabel(gMic); lbl.Text = 'Z (m):'; lbl.FontWeight = 'bold'; lbl.FontSize = 10;
-lbl.Layout.Row = rr; lbl.Layout.Column = 1;
-
-edZ = uieditfield(gMic,'numeric','Value',0,'ValueDisplayFormat','%.4f');
-edZ.Layout.Row = rr; edZ.Layout.Column = 2;
-
-slZ = uislider(gMic,'Limits',[-edLmax.Value edLmax.Value],'Value',0);
-slZ.Layout.Row = rr; slZ.Layout.Column = [3 4];
-slZ.FontSize  = 6;
-slZ.FontColor = THEME.accentColor;
-updateSliderLimits();   % sets Limits
-try
-    slZ.MajorTicks = [];
-    slZ.MajorTickLabels = {};
-catch
-end
-drawnow;                % forces first paint
-rr = rr + 1;
-
-
-% ==================== (B) Apply / Reset area ====================
-pMicApply = uipanel(gMicOuter,'Title','Value Changes','FontWeight','bold','FontSize',LabelFontSize);
-pMicApply.Layout.Row = 2;
-pMicApply.BackgroundColor = THEME.headerTeal;
-
-gApply = uigridlayout(pMicApply,[2 1]);
-gApply.RowHeight = {34, 34};
-gApply.ColumnWidth = {'1x'};
-gApply.Padding = [10 10 10 10];
-gApply.RowSpacing = 8;
-
-btnApplyAll = uibutton(gApply,'Text','Apply Changes', ...
-    'FontWeight','bold','FontSize',LabelFontSize, ...
-    'Enable','off', ...
-    'ButtonPushedFcn',@(~,~)applyAllChanges());
-btnApplyAll.Layout.Row = 1;
-btnApplyAll.Layout.Column = 1;
-btnApplyAll.BackgroundColor = THEME.accentColor;
-btnApplyAll.FontColor = [1 1 1];
-setTip(btnApplyAll,"Applies all edited settings (seed, N, field/grid params, octants, etc.) and refreshes the geometry display.");
-
-btnReset = uibutton(gApply,'Text','Reset Defaults', ...
-    'FontWeight','bold','FontSize',LabelFontSize, ...
-    'ButtonPushedFcn',@(~,~)doResetDefaults());
-btnReset.Layout.Row = 2;
-btnReset.Layout.Column = 1;
-btnReset.BackgroundColor = THEME.secondaryBtn;
-btnReset.FontColor = THEME.textColor;
-setTip(btnReset,"Resets all parameters to defaults, clears results/history, and generates a fresh default geometry.");
-
-% Wire up callbacks (same as before)
-slX.ValueChangingFcn = @(~,evt)micMoveFromSlider('x',evt.Value);
-slY.ValueChangingFcn = @(~,evt)micMoveFromSlider('y',evt.Value);
-slZ.ValueChangingFcn = @(~,evt)micMoveFromSlider('z',evt.Value);
-
-edX.ValueChangedFcn = @(~,~)micMoveFromEdit();
-edY.ValueChangedFcn = @(~,~)micMoveFromEdit();
-edZ.ValueChangedFcn = @(~,~)micMoveFromEdit();
-
-%% ==================== Display Options ====================
-pDisp = uipanel(gLeft,'Title','Display & Handling','FontWeight','bold','FontSize',LabelFontSize);
-pDisp.Layout.Row = 2;
-pDisp.Layout.Column = 2;
-pDisp.BackgroundColor = THEME.mutedBg;
-
-% --- OUTER grid to vertically centre content ---
-gDispOuter = uigridlayout(pDisp,[3 1]);
-gDispOuter.RowHeight   = {'1x','fit','1x'};   % spacer | content | spacer
-gDispOuter.ColumnWidth = {'1x'};
-gDispOuter.Padding     = [10 10 10 10];
-
-% ==================== ACTUAL content grid ====================
-gDisp = uigridlayout(gDispOuter,[2 2]);
-gDisp.Layout.Row = 2;          % <-- centre row
-gDisp.Padding = [0 0 0 0];
-gDisp.RowHeight = {28,'fit'};
-gDisp.ColumnWidth = {'1x','1x'};
-gDisp.RowSpacing = 10;
-gDisp.ColumnSpacing = 8;
-
-ddMetric = uidropdown(gDisp,'Items',{'Position Error (cm)','Angular Error (deg)'},...
-    'Value','Position Error (cm)',...
-    'ValueChangedFcn',@(~,~)metricChanged());
-ddMetric.Layout.Row = 1; ddMetric.Layout.Column = 1;
-
-btnExportWS = uibutton(gDisp,'Text','Export Workspace','ButtonPushedFcn',@(~,~)doExportWorkspace());
-
-btnExportWS.Layout.Row = 1; btnExportWS.Layout.Column = 2;
-btnExportWS.BackgroundColor = THEME.secondaryBtn;
-btnExportWS.FontColor = THEME.textColor;
-if IS_DEPLOYED
-    btnExportWS.Enable = 'off';
-    setTip(btnExportWS, "Feature only available via MATLAB launch");
-else
-    btnExportWS.Enable = 'on';
-    setTip(btnExportWS, "Export the program variables to active MATLAB workspace.");
-end
-
-% ---- Octant selector panel INSIDE Display Options ----
-pQuad = uipanel(gDisp,'Title','Optimisation Octants', 'BorderType','none', 'FontWeight','bold','FontSize',10);
-setTip(pQuad, "Select which regions to include in the optimisation.");
-pQuad.Layout.Row = 2;
-pQuad.Layout.Column = [1 2];
-% pQuad.BackgroundColor = [0.99 0.99 1];
-
-gQuad = uigridlayout(pQuad,[4 2]);
-gQuad.RowHeight = repmat({24},1,4);
-gQuad.ColumnWidth = {'1x','1x'};
-gQuad.Padding = [8 6 8 8];
-gQuad.RowSpacing = 4;
-gQuad.ColumnSpacing = 8;
-
-cbFrontTopLeft     = mkCB(gQuad,1,1,'Front Top Left',true);
-cbFrontTopRight    = mkCB(gQuad,1,2,'Front Top Right',true);
-cbFrontBottomLeft  = mkCB(gQuad,2,1,'Front Bottom Left',true);
-cbFrontBottomRight = mkCB(gQuad,2,2,'Front Bottom Right',true);
-cbBackTopLeft      = mkCB(gQuad,3,1,'Back Top Left',true);
-cbBackTopRight     = mkCB(gQuad,3,2,'Back Top Right',true);
-cbBackBottomLeft   = mkCB(gQuad,4,1,'Back Bottom Left',true);
-cbBackBottomRight  = mkCB(gQuad,4,2,'Back Bottom Right',true);
-
-cbFrontTopLeft.ValueChangedFcn     = @(~,~)markDirty("Octants changed");
-cbFrontTopRight.ValueChangedFcn    = @(~,~)markDirty("Octants changed");
-cbFrontBottomLeft.ValueChangedFcn  = @(~,~)markDirty("Octants changed");
-cbFrontBottomRight.ValueChangedFcn = @(~,~)markDirty("Octants changed");
-cbBackTopLeft.ValueChangedFcn      = @(~,~)markDirty("Octants changed");
-cbBackTopRight.ValueChangedFcn     = @(~,~)markDirty("Octants changed");
-cbBackBottomLeft.ValueChangedFcn   = @(~,~)markDirty("Octants changed");
-cbBackBottomRight.ValueChangedFcn  = @(~,~)markDirty("Octants changed");
-
-%% ==================== Initialise ====================
-% Ensure every UI component that supports FontName uses the theme font.
-try
-    uic = findall(fig,'-property','FontName');
-    for ii = 1:numel(uic)
-        try
-            uic(ii).FontName = THEME.fontName;
-        catch
-            % ignore objects that for some reason can't be set
-        end
+%% ====================================================================
+%  UI helper constructors
+%% ====================================================================
+    function g = mkPanelGrid(parent, title, nRows, row, col, bg)
+        p = uipanel(parent, 'Title', title, 'FontWeight', 'bold');
+        p.Layout.Row = row; p.Layout.Column = col;
+        p.BackgroundColor = bg;
+        g = uigridlayout(p, [nRows 2]);
+        g.RowHeight = repmat({22}, 1, nRows);
+        g.ColumnWidth = {205, '1x'};
+        g.Padding = [8 6 8 6];
+        g.RowSpacing = 4;
+        g.ColumnSpacing = 6;
+        g.Scrollable = 'on';
+        g.UserData = 0;
     end
-catch
-    % older MATLAB versions may not allow findall on uifigure — ignore safely
-end
 
-applyAllChanges();  % sets seed + reconciles geometry for current N/Lmax
-doRandomise();
-%% ==================== Callbacks ====================
-
-    function showAbout()
-
-        html = strjoin([ ...
-            "<!doctype html><html><head><meta charset='utf-8'>", ...
-            "<style>", ...
-            "body{font-family:system-ui,-apple-system,Segoe UI,Helvetica,Arial,sans-serif;", ...
-            "font-size:14px;color:#111;line-height:1.35;margin:0;padding:14px;}", ...
-            "h2{margin:0 0 10px 0;font-size:16px;}", ...
-            ".muted{color:#444;}", ...
-            ".code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}", ...
-            "ul{margin:6px 0 10px 18px;padding:0;}", ...
-            "</style></head><body>", ...
-            " " ...
-            "<h2>ABOUT</h2>", ...
-            "<div class='muted'>WAH-<i>i</i> — Widefield Acoustics Heuristic (inverse iterative)</div>", ...
-            "<div>Version: 1.0</div>", ...
-            "<div>Initial release: February 2026</div>", ...
-            "<div>Copyright: Ravi Umadi - <span class='code'>https://biosonix.io</span></div>", ...
-            "<div>License: GPLv3</div>", ...
-            "<div>GitHub: <span class='code'>https://github.com/raviumadi/WAHi-Optimiser</span></div>", ...
-            "<div>Documentation and User Guide <span class='code'>https://raviumadi.github.io/WAHi-Optimiser/</span></div>", ...
-            "<br>", ...
-            " " ...
-            "<b>Related research articles</b><br>", ...
-            "1. Umadi (2025), <b>Widefield acoustics heuristic: advancing microphone array design for accurate spatial tracking of echolocating bats</b>. <i>BMC Ecology and Evolution</i> — <span class='code'>https://doi.org/10.1186/s12862-025-02441-4</span><br>", ...
-            ...
-            " ", ...
-            "2. Umadi (2026), <b>WAH-<i>i</i> : Optimising Microphone Array Geometry for Customised Localisation Accuracy</b>. <span class='code'>https://doi.org/10.64898/2026.02.07.704547</span><br>", ... % <-- UPDATE THIS
-            " ", ...
-            "3. Umadi (2025), <b>BATSY4-PRO: An Open-Source Multichannel Ultrasound Recorder for Field Bioacoustics</b>. <span class='code'>https://doi.org/10.1101/2025.08.11.669530</span><br>", ...
-            " ", ...
-            "4. Umadi (2026), <b>ESPERDYNE: A dual-band heterodyne monitor and ultrasound recorder for bioacoustic field surveys</b>. <i>Methods in Ecology and Evolution</i> - <span class='code'>https://doi.org/10.1111/2041-210x.70241</span><br>", ...
-            " ", ...
-            "<br>", ...
-            "<div>WAH-<i>i</i> is an optimiser for finding microphone-array geometries that meet a desired field of accuracy.</div>", ...
-            "<div>The interface exposes the full set of algorithm parameters, enabling unusually fine control over array-geometry trade-offs, ", ...
-            "and making it practical to reach very high accuracy when combined with staged optimisation and careful refinement.</div>", ...
-            "<br>", ...
-            " " ...
-            "<div><b>Reports and export options support a clean workflow:</b></div>", ...
-            "<ul>", ...
-            "<li>Export geometry to CSV for CAD pipelines</li>", ...
-            "<li>Export run history to MAT for deeper analysis in MATLAB or Python</li>", ...
-            "</ul>", ...
-            "<br>", ...
-            " " ...
-            "<b>SUPPORT</b><br>", ...
-            "<div>To help me continue releasing tools like this, and other related projects, freely and to promote science, consider buying me a coffee:</div>", ...
-            "<div class='code'>https://buymeacoffee.com/raviumadi</div>", ...
-            "<br>", ...
-            "<div><i>If you can, help promote education in developing countries.</i></div>", ...
-            "</body></html>" ...
-            ], "");
-
-        % Add as many as you want here (scales)
-        linkLabels = { ...
-            'Biosonix', ...
-            'User Guide', ...
-            'Widefield Acoustics Heuristic (Research Paper)', ...
-            'WAH-i: Optimising Microphone Array Geometry (Research Paper)', ...
-            'BATSY4-PRO (Research Paper)', ...
-            'ESPERDYNE (Research Paper)', ...
-            'Github Repo', ...
-            'Buy me a coffee' ...
-            };
-
-        linkUrls = { ...
-            'https://biosonix.io', ...
-            'https://raviumadi.github.io/WAHi-Optimiser/', ...
-            'https://doi.org/10.1186/s12862-025-02441-4', ...
-            'https://doi.org/10.64898/2026.02.07.704547', ... % <-- UPDATE
-            'https://doi.org/10.1101/2025.08.11.669530', ...
-            'https://doi.org/10.1111/2041-210x.70241', ...
-            'https://github.com/raviumadi/WAHi-Optimiser', ...
-            'https://buymeacoffee.com/raviumadi' ...
-            };
-
-        showHtmlPopupWindow('About WAH-i', html, linkLabels, linkUrls);
+    function r = nextRow(g, span)
+        if nargin < 2, span = 1; end
+        r0 = g.UserData + 1;
+        g.UserData = g.UserData + span;
+        if span > 1, r = [r0 r0+span-1]; else, r = r0; end
     end
-    function showHtmlPopupWindow(titleStr, htmlText, linkLabels, linkUrls)
 
-        % Ensure scalar char (uihtml wants a single document string)
-        if isstring(htmlText) && ~isscalar(htmlText)
-            htmlText = strjoin(htmlText, "");
+    function h = addNum(g, label, key, def, lim, fmt, tip, isInt, grp)
+        r = nextRow(g);
+        lb = uilabel(g, 'Text', label, 'FontWeight', 'bold', 'Tooltip', tip);
+        lb.Layout.Row = r; lb.Layout.Column = 1;
+        h = uieditfield(g, 'numeric', 'Value', def, 'Limits', lim, 'ValueDisplayFormat', fmt, 'Tooltip', tip);
+        if isInt, h.RoundFractionalValues = 'on'; end
+        h.Layout.Row = r; h.Layout.Column = 2;
+        h.Tag = key; h.ValueChangedFcn = PARAMCB;
+        CTRL.(key) = h; DEF.(key) = def; GRP.(key) = grp;
+    end
+
+    function h = addDrop(g, label, key, items, def, tip, grp)
+        r = nextRow(g);
+        lb = uilabel(g, 'Text', label, 'FontWeight', 'bold', 'Tooltip', tip);
+        lb.Layout.Row = r; lb.Layout.Column = 1;
+        h = uidropdown(g, 'Items', items, 'Value', def, 'Tooltip', tip);
+        h.Layout.Row = r; h.Layout.Column = 2;
+        h.Tag = key; h.ValueChangedFcn = PARAMCB;
+        CTRL.(key) = h; DEF.(key) = def; GRP.(key) = grp;
+    end
+
+    function h = addTxt(g, label, key, def, tip, grp)
+        r = nextRow(g);
+        lb = uilabel(g, 'Text', label, 'FontWeight', 'bold', 'Tooltip', tip);
+        lb.Layout.Row = r; lb.Layout.Column = 1;
+        h = uieditfield(g, 'text', 'Value', def, 'Tooltip', tip);
+        h.Layout.Row = r; h.Layout.Column = 2;
+        h.Tag = key; h.ValueChangedFcn = PARAMCB;
+        CTRL.(key) = h; DEF.(key) = def; GRP.(key) = grp;
+    end
+
+    function h = addChk(g, label, key, def, tip, grp)
+        r = nextRow(g);
+        h = uicheckbox(g, 'Text', label, 'Value', def, 'Tooltip', tip);
+        h.Layout.Row = r; h.Layout.Column = [1 2];
+        h.Tag = key; h.ValueChangedFcn = PARAMCB;
+        CTRL.(key) = h; DEF.(key) = def; GRP.(key) = grp;
+    end
+
+    function lb = addInfo(g, txt, span)
+        r = nextRow(g, span);
+        lb = uilabel(g, 'Text', txt, 'WordWrap', 'on', 'VerticalAlignment', 'top', 'FontColor', [0.25 0.25 0.3]);
+        lb.Layout.Row = r; lb.Layout.Column = [1 2];
+    end
+
+    function gb = addButtons(g, labels, fcns, useRow)
+        gb = uigridlayout(g, [1 numel(labels)]);
+        gb.Padding = [0 0 0 0];
+        gb.ColumnSpacing = 6;
+        gb.ColumnWidth = repmat({'1x'}, 1, numel(labels));
+        if useRow
+            gb.Layout.Row = nextRow(g);
+            gb.Layout.Column = [1 2];
         end
-        htmlText = char(htmlText);
-
-        % Defensive defaults
-        if nargin < 3 || isempty(linkLabels), linkLabels = {}; end
-        if nargin < 4 || isempty(linkUrls),   linkUrls   = {}; end
-
-        w = 760; h = 860;
-        pos = fig.Position;
-        x = pos(1) + (pos(3)-w)/2;
-        y = pos(2) + (pos(4)-h)/2;
-
-        d = uifigure('Name', titleStr, 'Position', [x y w h], ...
-            'Color', THEME.panelBg, 'Resize','off', 'WindowStyle','modal');
-
-        gl = uigridlayout(d,[3 1]);
-        gl.RowHeight = {'1x', 40, 48};
-        gl.Padding = [12 12 12 12];
-        gl.RowSpacing = 10;
-        
-        htm = uihtml(gl);
-        htm.Layout.Row = 1;
-        htm.HTMLSource = htmlText;
-            
-        % --- Single link opener row ---
-        row = uigridlayout(gl, [1 3]);
-        row.Layout.Row = 2;
-        row.ColumnWidth = {'1x', 120, 90};
-        row.ColumnSpacing = 8;
-        row.Padding = [0 0 0 0];
-        row.BackgroundColor = THEME.panelBg;
-
-        dd = uidropdown(row, 'Items', linkLabels, 'ItemsData', linkUrls);
-        dd.Tooltip = 'Select a link to open in your browser';
-
-        bOpen = uibutton(row, 'Text', 'Open link', 'ButtonPushedFcn', @(~,~)openUrl(dd.Value));
-        bOpen.BackgroundColor = THEME.secondaryBtn;
-        bOpen.FontColor = THEME.textColor;
-
-        bCopy = uibutton(row, 'Text', 'Copy', 'ButtonPushedFcn', @(~,~)copyUrl(dd.Value));
-        bCopy.BackgroundColor = THEME.secondaryBtn;
-        bCopy.FontColor = THEME.textColor;
-
-        if isempty(linkUrls)
-            row.Visible = 'off';
-        end
-
-        % Close button
-        btn = uibutton(gl, 'Text','Close', 'ButtonPushedFcn', @(~,~)delete(d));
-        btn.Layout.Row = 3;
-        btn.BackgroundColor = THEME.secondaryBtn;
-        btn.FontColor = THEME.textColor;
-
-        function openUrl(url)
-            if isempty(url), return; end
-            try
-                web(char(url), '-browser');   % reliable: system browser
-            catch ME
-                uialert(d, sprintf('Could not open link:\n%s\n\n%s', char(url), ME.message), 'Link error');
-            end
-        end
-
-        function copyUrl(url)
-            if isempty(url), return; end
-            try
-                clipboard('copy', char(url));
-            catch ME
-                uialert(d, sprintf('Could not copy link:\n%s\n\n%s', char(url), ME.message), 'Clipboard error');
-            end
+        for q = 1:numel(labels)
+            b = uibutton(gb, 'Text', labels{q}, 'ButtonPushedFcn', fcns{q});
+            b.BackgroundColor = THEME.secondaryBtn;
+            b.FontColor = THEME.textColor;
         end
     end
 
-    function showTips()
-        txt = sprintf([ ...
-            'Workflow Guidelines\n\n' ...
-            '1) Multistep optimisation\n' ...
-            'Begin with a coarse (low-resolution) grid to identify a strong initial array configuration. ' ...
-            'Once a stable solution is reached, reuse that configuration as the starting point for a higher-resolution grid optimisation. ' ...
-            'This staged approach is often more efficient and reliable than optimising at full resolution from the outset.\n\n' ...
-            '2) Manual refinement\n' ...
-            'Some initial configurations converge to local performance ceilings or become trapped in shallow optima. ' ...
-            'In such cases, a full randomisation is not always necessary. ' ...
-            'Small, deliberate manual adjustments to microphone positions can reshape the error distribution and enable the optimiser to escape these valleys.\n\n' ...
-            '3) Building very high pass rates\n' ...
-            'For stringent accuracy requirements, avoid targeting very high pass rates in a single run. ' ...
-            'Instead, begin with a modest target (e.g. 60%% pass rate), then progressively tighten the accuracy threshold while reducing step size and adjusting penalty or weighting parameters. ' ...
-            'Successive optimisation runs refine the geometry without undoing earlier gains, and typically yield more robust high-accuracy solutions.\n' ...
-            ]);
-        showPopupWindow('Optimisation Tips', txt);
-    end
-
-    function showPopupWindow(titleStr, bodyText)
-        % Modal dialog-like uifigure (works reliably across versions)
-        d = uifigure('Name', titleStr, ...
-            'Position', centreOnParent(fig, [640 420]), ...
-            'Color', THEME.panelBg, ...
-            'Resize', 'off', ...
-            'WindowStyle', 'modal');
-
-        try
-            d.FontName = THEME.fontName;
-            d.FontSize = 11;
-        catch
-        end
-
-        g = uigridlayout(d, [3 1]);
-        g.RowHeight = {28, '1x', 40};
-        g.Padding = [14 14 14 14];
-        g.RowSpacing = 10;
-
-        % Header
-        lbl = uilabel(g, 'Text', titleStr, 'FontWeight', 'bold');
-        lbl.FontColor = THEME.textColor;
-        lbl.FontSize = 14;
-
-        % Body (scrollable text)
-        ta = uitextarea(g, ...
-            'Value', splitlines(string(bodyText)), ...
-            'Editable', 'off');
-        ta.FontName = THEME.fontName;
-        ta.FontSize = 11;
-
-        % Close button
-        btn = uibutton(g, 'Text', 'Close', 'ButtonPushedFcn', @(~,~)delete(d));
-        btn.BackgroundColor = THEME.secondaryBtn;
-        btn.FontColor = THEME.textColor;
-    end
-
-    function openGuide(url)
-        try
-            web(char(url), '-browser');   % system default browser
-        catch ME
-            uialert(fig, sprintf('Could not open documentation link:\n%s\n\n%s', char(url), ME.message), ...
-                'Link error');
-        end
-    end
-
-    function pos = centreOnParent(parentFig, sz)
-        % sz = [w h], returns [x y w h] centred on parentFig
-        w = sz(1); h = sz(2);
-        try
-            p = parentFig.Position; % [x y w h]
-            x = p(1) + (p(3)-w)/2;
-            y = p(2) + (p(4)-h)/2;
-        catch
-            % fallback centre-ish
-            x = 200; y = 200;
-        end
-        pos = [round(x) round(y) w h];
-    end
-
-    % function updateQuadrants()
-    %     S.quadrants.frontTopLeft     = cbFrontTopLeft.Value;
-    %     S.quadrants.frontTopRight    = cbFrontTopRight.Value;
-    %     S.quadrants.frontBottomLeft  = cbFrontBottomLeft.Value;
-    %     S.quadrants.frontBottomRight = cbFrontBottomRight.Value;
-    %     S.quadrants.backTopLeft      = cbBackTopLeft.Value;
-    %     S.quadrants.backTopRight     = cbBackTopRight.Value;
-    %     S.quadrants.backBottomLeft   = cbBackBottomLeft.Value;
-    %     S.quadrants.backBottomRight  = cbBackBottomRight.Value;
-    % 
-    %     nEnabled = sum(structfun(@(x) x, S.quadrants));
-    %     updateStatus(sprintf('Quadrants: %d/8 enabled', nEnabled));
-    % end
-    % 
-    % function applySeed()
-    %     S.rngSeed = edSeed.Value;
-    %     rng(S.rngSeed,'twister');
-    %     updateStatus(sprintf('RNG seed: %d', S.rngSeed));
-    % end
-
-    function metricChanged()
-        if strcmp(ddMetric.Value,'Position Error (cm)')
-            S.metric = "pos";
+    function b = mkBtn(g, txt, fcn, row, col, primary, tip)
+        b = uibutton(g, 'Text', txt, 'ButtonPushedFcn', fcn, 'Tooltip', tip);
+        b.Layout.Row = row; b.Layout.Column = col;
+        if primary
+            b.BackgroundColor = THEME.accentColor; b.FontColor = [1 1 1]; b.FontWeight = 'bold';
         else
-            S.metric = "ang";
+            b.BackgroundColor = THEME.secondaryBtn; b.FontColor = THEME.textColor;
         end
-        refreshPlot(false);
     end
 
-    function doStop()
-        S.stopFlag = true;
-        updateStatus('Stopping optimiser...');
-    end
-
-    function doExportWorkspace()
-    if isdeployed
-        uialert(fig, 'Workspace export is only available in MATLAB (not in deployed apps).', ...
-            'Not available');
-        return;
-    end
-
-    assignin('base','iWAH_M',S.M);
-    assignin('base','iWAH_gridPts',S.gridPts);
-    assignin('base','iWAH_stats',S.lastStats);
-    assignin('base','iWAH_diag',S.diag);
-    assignin('base','iWAH_H',S.H);
-    assignin('base','iWAH_runInfo',S.runInfo);
-    updateStatus('Exported to workspace: iWAH_M, iWAH_gridPts, iWAH_stats, iWAH_diag, iWAH_H, iWAH_runInfo');
-end
-
-    function doExportRun()
-        if isempty(S.H) || isempty(S.runInfo)
-            uialert(fig,'No run history found. Run WAH or Optimise first.','Nothing to export');
-            return;
-        end
+%% ====================================================================
+%  Parameter handling
+%% ====================================================================
+    function onParamChanged(key)
+        grp = GRP.(key);
         try
-            [file, path] = uiputfile({'*.mat','MAT-files (*.mat)'}, 'Save run as .mat', defaultRunFileName());
-            if isequal(file,0)
-                updateStatus('Export cancelled');
-                return;
+            switch grp
+                case 'preset'
+                    applyPreset(true);
+                    clearResults();
+                    refreshEnvPlots();
+                case 'call'
+                    updateCall(true);
+                    clearResults();
+                    refreshEnvPlots();
+                case 'array'
+                    clearResults();
+                    refreshArrayTab(); refreshEnvPlots(); refreshFieldPlot();
+                case 'env'
+                    if any(strcmp(key, {'lat0','lon0'})), onOriginChanged(); end
+                    clearResults();
+                    refreshArrayTab(); refreshEnvPlots(); refreshGridPreview(); refreshFieldPlot();
+                case 'field'
+                    clearResults();
+                    updateDepthLayers();
+                    refreshGridPreview(); refreshFieldPlot(); refreshEnvPlots();
+                case 'loc'
+                    clearResults();
+                    refreshEnvPlots(); refreshFieldPlot();
+                case 'disp'
+                    refreshFieldPlot();
+                otherwise
+                    % no immediate action
             end
-            H = S.H;
-            runInfo = S.runInfo;
-            save(fullfile(path,file), 'H', 'runInfo', '-v7.3');
-            updateStatus(sprintf('Saved run: %s', file));
+            if any(strcmp(grp, {'call','array','env','field','loc','preset'}))
+                updateStatus('Settings changed - evaluate the field again to update results.');
+            end
         catch ME
-            uialert(fig, ME.message, 'Export Error');
-            updateStatus('Export failed');
+            updateStatus(['Error: ' ME.message]);
         end
     end
 
-    function doReport()
-        if strcmp(btnReport.Enable,'off')
-            uialert(fig,'Run the optimiser first to generate a report.','Report unavailable');
-            return;
+    function P = readParams(doValidate)
+        if nargin < 1, doValidate = true; end
+        P = struct();
+        % array
+        P.ox = getv('ox'); P.oy = getv('oy');
+        P.placeMode = placeCode(getv('placeMode'));
+        P.yaw = getv('yaw'); P.pitch = getv('pitch'); P.roll = getv('roll');
+        P.refDepth = getv('refDepth');
+        P.Lmax = getv('Lmax'); P.minPair = getv('minPair');
+        % environment
+        P.flatDepth = getv('flatDepth');
+        P.sspModel = getv('sspModel'); P.c0 = getv('c0');
+        switch getv('locSSPMode')
+            case 'Constant c (below)', P.locSSPMode = 'constant';
+            case 'Ray-traced (profile at array)', P.locSSPMode = 'ray';
+            otherwise, P.locSSPMode = 'env';
         end
-        if isempty(S.H) || numel(S.H.iter) < 1
-            uialert(fig,'No run history. Run WAH or Optimise first.','No data');
-            return;
+        if startsWith(getv('propModel'), 'Ray'), P.propModel = 'ray'; else, P.propModel = 'straight'; end
+        P.BL = getv('BL'); P.nRays = round(getv('nRays'));
+        switch getv('rayArrivals')
+            case 'Strongest arrival only', P.rayArrivals = 'strongest';
+            case 'First arrival only', P.rayArrivals = 'first';
+            otherwise, P.rayArrivals = 'all';
         end
+        P.cLoc = getv('cLoc');
+        if strcmp(getv('snrMode'), 'Fixed SNR'), P.snrMode = 'fixed'; else, P.snrMode = 'sonar'; end
+        P.snrFixed = getv('snrFixed'); P.NL = getv('NL');
+        sp = getv('spreading');
+        if startsWith(sp, 'Spherical'), P.spreading = 'spherical';
+        elseif startsWith(sp, 'Practical'), P.spreading = 'practical';
+        elseif startsWith(sp, 'Cylindrical'), P.spreading = 'cylindrical';
+        else, P.spreading = 'hybrid';
+        end
+        P.transR = getv('transR'); P.absorption = logical(getv('absorption'));
+        P.DT = getv('DT'); P.minDetect = round(getv('minDetect'));
+        P.timingSigma = getv('timingMs')/1000; P.posSigma = getv('posSigma');
+        % call
+        P.preset = getv('callPreset');
+        P.fs = getv('fs'); P.dur = getv('dur'); P.f0 = getv('f0'); P.f1 = getv('f1');
+        P.sweep = getv('sweep'); P.taper = getv('taper')/100; P.SL = getv('SL'); P.tplFs = getv('tplFs');
+        % field
+        P.fcx = getv('fcx'); P.fcy = getv('fcy'); P.R = getv('R'); P.Rin = getv('Rin'); P.step = getv('step');
+        if strcmp(getv('layout'), 'Polar rings'), P.layout = 'polar'; else, P.layout = 'cartesian'; end
+        P.azFrom = getv('azFrom'); P.azTo = getv('azTo');
+        P.depths = parseDepths(getv('depths'));
+        P.minDistAny = getv('minDistAny');
+        % localisation
+        if startsWith(getv('solveMode'), '3-D'), P.solveMode = '3d'; else, P.solveMode = '2d'; end
+        P.assumedDepth = getv('assumedDepth');
+        P.useTrueDepth = logical(getv('useTrueDepth'));
+        if startsWith(getv('tdoaMethod'), 'Envelope'), P.tdoaMethod = 'envelope'; else, P.tdoaMethod = 'waveform'; end
+        if startsWith(getv('scoreMetric'), '3-D'), P.scoreMetric = '3d'; else, P.scoreMetric = 'horizontal'; end
+        if startsWith(getv('undetPolicy'), 'Exclude'), P.undetected = 'exclude'; else, P.undetected = 'fail'; end
+        P.best = getv('best'); P.tol = getv('tol'); P.threshold_m = P.best + P.tol;
+        P.lambda = getv('lambda'); P.failPen = getv('failPen'); P.seed = round(getv('seed'));
+        P.useParallel = logical(getv('useParallel'));
+        % optimiser
+        P.maxIters = round(getv('maxIters')); P.probes = round(getv('probes'));
+        P.initStep = getv('initStep'); P.minStep = getv('minStep'); P.stall = round(getv('stall'));
+        P.shake = getv('shake'); P.epsJ = getv('epsJ'); P.targetPass = getv('targetPass');
+        P.moveZ = startsWith(getv('moveMode'), '3-D');
 
+        if doValidate && P.Rin >= P.R, error('Field inner radius must be smaller than the outer radius.'); end
+        if strcmp(P.solveMode, '3d'), P.minDetect = max(P.minDetect, 4); else, P.minDetect = max(P.minDetect, 3); end
+    end
+
+    function val = getv(key)
+        val = CTRL.(key).Value;
+    end
+
+    function a = parseAngles(str)
+        parts = regexp(char(str), '[,;\s]+', 'split');
+        a = str2double(parts);
+        a = unique(wrapDeg(a(isfinite(a))));
+    end
+
+    function a = wrapDeg(a)
+        a = mod(a + 180, 360) - 180;          % (-180, 180]
+        a(a == -180) = 180;
+    end
+
+    function d = parseDepths(str)
+        parts = regexp(char(str), '[,;\s]+', 'split');
+        d = str2double(parts);
+        d = abs(d(isfinite(d)));
+        if isempty(d), d = 50; end
+        d = unique(d);
+    end
+
+    function A = placement(P, ox, oy, yaw)
+        if nargin < 2, ox = P.ox; oy = P.oy; end
+        if nargin < 4, yaw = P.yaw; end
+        A = struct('ox', ox, 'oy', oy, 'mode', P.placeMode, 'refDepth', P.refDepth, ...
+            'yaw', yaw, 'pitch', P.pitch, 'roll', P.roll);
+    end
+
+    function c = placeCode(label)
+        if startsWith(label, 'Seafloor frame'), c = 'frame';
+        elseif startsWith(label, 'Fixed'), c = 'fixed';
+        else, c = 'seafloor';
+        end
+    end
+
+    function label = placeLabel(code)
+        switch lower(code)
+            case 'frame', label = 'Seafloor frame (rigid)';
+            case 'fixed', label = 'Fixed depth (rigid)';
+            otherwise, label = 'Seafloor-mounted (each element)';
+        end
+    end
+
+    function env = currentEnv(P)
+        env = S.env;
+        env.flatDepth = P.flatDepth;
+        switch P.sspModel
+            case 'Constant'
+                env.ssp = OceanEnvironment.constantSSP(P.c0);
+            case '1-D profile (file)'
+                if isempty(S.sspProfile), error('Truth model is "1-D profile" but no profile is loaded (Environment tab).'); end
+                env.ssp = S.sspProfile;
+            otherwise
+                if isempty(S.ncom), error('Truth model is "3-D field" but no NCOM file is loaded (Environment tab).'); end
+                env.ssp = OceanEnvironment.fieldSSP(S.ncom);
+        end
+        env.prop = struct('spreading', P.spreading, 'transR', P.transR, 'absorption', P.absorption);
+    end
+
+    function o = patternOpts()
+        o = struct('N', CTRL.patN.Value, 'dx', CTRL.patDx.Value, 'dy', CTRL.patDy.Value, ...
+            'nx', CTRL.patNx.Value, 'ny', CTRL.patNy.Value, 'rot', CTRL.patRot.Value, ...
+            'jitter', CTRL.patJit.Value, 'z', CTRL.patZ.Value, 'Lmax', CTRL.Lmax.Value, 'minPair', CTRL.minPair.Value);
+    end
+
+    function ctx = buildContext(P)
+        % Everything needed to evaluate a geometry: env, grid, cfg, scoring
+        ctx = struct();
+        ctx.P = P;
+        ctx.env = currentEnv(P);
+        if isempty(S.call), updateCall(false); end
+        if isempty(S.call), error('No call signal available (Calls tab).'); end
+        F = struct('cx', P.fcx, 'cy', P.fcy, 'R', P.R, 'Rin', P.Rin, 'step', P.step, ...
+            'layout', P.layout, 'azFrom', P.azFrom, 'azTo', P.azTo, 'depths', P.depths);
+        [ctx.grid, ctx.gridInfo] = wahi_build_field_grid(F, ctx.env);
+        if isempty(ctx.grid), error('No synthetic sources: field is empty, on land, or deeper than the seabed.'); end
+        cfg = struct();
+        cfg.fs = P.fs; cfg.call = S.call; cfg.band = S.band;
+        cfg.snrMode = P.snrMode; cfg.snrFixed = P.snrFixed; cfg.SL = P.SL; cfg.NL = P.NL;
+        cfg.DT = P.DT; cfg.minDetect = P.minDetect;
+        cfg.timingSigma = P.timingSigma; cfg.posSigma = P.posSigma;
+        cfg.solveMode = P.solveMode; cfg.assumedDepth = P.assumedDepth;
+        cfg.tdoaMethod = P.tdoaMethod; cfg.seed = P.seed;
+        cfg.useTrueDepth = P.useTrueDepth;
+        cfg.locSSP = OceanEnvironment.constantSSP(P.cLoc);
+        ctx.cfg = cfg;
+        ctx.E = struct('threshold_m', P.threshold_m, 'failPenalty_m', P.failPen, ...
+            'minDistToAnyHyd', P.minDistAny, 'scoreMetric', P.scoreMetric, ...
+            'undetected', P.undetected, 'seed', P.seed, 'useParallel', P.useParallel, ...
+            'progressFcn', PROGRESSCB);
+    end
+
+    function [st, dg, Hn] = evaluateGeometry(Mrel, ox, oy, ctx, yaw)
+        P = ctx.P;
+        if nargin < 5, yaw = P.yaw; end
+        Hn = HydrophoneGeometry.toAbsolute(Mrel, placement(P, ox, oy, yaw), ctx.env);
+        wd = OceanEnvironment.waterDepth(ctx.env, Hn(:,1), Hn(:,2));
+        if any(wd <= 0), error('A hydrophone is on land at this position.'); end
+        if any(HydrophoneGeometry.belowSeabed(Hn, ctx.env)), error('A hydrophone is below the seabed (check pitch/roll / reference depth).'); end
+        Xp = Hn(:,1:2) - mean(Hn(:,1:2), 1);
+        if rank(Xp, 1e-6*max(1, max(abs(Xp(:))))) < 2, error('Hydrophones are collinear in plan view (no horizontal fix).'); end
+        cfg = wahi_geometry_cfg(ctx.cfg, P, ctx.env, Hn, ctx.grid);
+        loc = WhaleCallLocaliser(cfg, ctx.env, Hn);
+        [st, dg] = wahi_evaluate_field(loc, ctx.grid, ctx.E);
+    end
+
+    function abort = progressCb(i, n)
+        updateStatus(sprintf('%s source %d / %d', S.progressPrefix, i, n));
+        drawnow limitrate;
+        abort = S.stopFlag;
+    end
+
+    function J = scoreJ(st, P)
+        J = st.passRate - P.lambda * min(st.meanErr / P.failPen, 1);
+    end
+
+%% ====================================================================
+%  Calls
+%% ====================================================================
+    function applyPreset(doUpdate)
+        p = WhaleCallLibrary.getPreset(CTRL.callPreset.Value);
+        lblCallNote.Text = p.note;
+        if ~startsWith(p.kind, 'template')
+            CTRL.f0.Value = p.f0; CTRL.f1.Value = p.f1; CTRL.dur.Value = p.dur;
+            CTRL.fs.Value = p.fs; CTRL.sweep.Value = p.sweep; CTRL.SL.Value = p.SL;
+        elseif isempty(S.callTemplate.values)
+            updateStatus('Template preset selected - click "Import template..." to load a file.');
+        end
+        if nargin < 1 || doUpdate, updateCall(true); else, updateCall(false); end
+    end
+
+    function setPresetNote()
+        pp = WhaleCallLibrary.getPreset(CTRL.callPreset.Value);
+        lblCallNote.Text = pp.note;
+    end
+
+    function spec = callSpec()
+        p = WhaleCallLibrary.getPreset(CTRL.callPreset.Value);
+        spec = struct('kind', p.kind, 'f0', CTRL.f0.Value, 'f1', CTRL.f1.Value, 'dur', CTRL.dur.Value, ...
+            'sweep', CTRL.sweep.Value, 'taper', CTRL.taper.Value/100, 'template', [], 'templateFs', NaN, 'templateAmp', []);
+        if startsWith(p.kind, 'template')
+            spec.template = S.callTemplate.values;
+            spec.templateAmp = S.callTemplate.amp;
+            spec.templateFs = S.callTemplate.fs;
+            if ~isfinite(spec.templateFs) && CTRL.tplFs.Value > 0, spec.templateFs = CTRL.tplFs.Value; end
+        end
+    end
+
+    function updateCall(doPlot)
+        if nargin < 1, doPlot = true; end
+        spec = callSpec();
+        fs = CTRL.fs.Value;
+        if startsWith(spec.kind, 'template') && isempty(spec.template)
+            S.call = []; S.band = [NaN NaN];
+            lblBand.Text = 'Band: --- (no template loaded)';
+            if doPlot, plotCall(); end
+            return;
+        end
+        if ~startsWith(spec.kind, 'template') && max(spec.f0, spec.f1) >= fs/2
+            updateStatus(sprintf('Warning: call frequency %.0f Hz is above Nyquist (fs/2 = %.0f Hz) - increase the sample rate.', max(spec.f0,spec.f1), fs/2));
+        end
+        S.call = WhaleCallLibrary.synthesize(spec, fs);
+        [a, b] = WhaleCallLibrary.estimateBand(S.call, fs);
+        S.band = [a b];
+        lblBand.Text = sprintf('Band used for noise/filtering: %.4g - %.4g Hz  |  %d samples (%.4g s)', a, b, numel(S.call), numel(S.call)/fs);
+        if doPlot, plotCall(); end
+    end
+
+    function plotCall()
+        cla(axWave); cla(axSpec);
+        if isempty(S.call)
+            title(axWave, 'No call'); return;
+        end
+        fs = CTRL.fs.Value;
+        t = (0:numel(S.call)-1)/fs;
+        plot(axWave, t, S.call, 'Color', THEME.accentColor);
+        xlabel(axWave, 'Time (s)'); ylabel(axWave, 'Amplitude');
+        title(axWave, sprintf('%s', CTRL.callPreset.Value), 'Interpreter', 'none');
+        grid(axWave, 'on');
+        axis(axWave, 'tight');
+        [Sp, f, tt] = WhaleCallLibrary.spectrogramSimple(S.call, fs);
+        imagesc(axSpec, tt, f, Sp);
+        axSpec.YDir = 'normal';
+        colormap(axSpec, parula);
+        mx = max(Sp(:));
+        caxis(axSpec, [mx-60 mx]);
+        fTop = min(fs/2, max(S.band(2)*1.5, S.band(2) + 10));
+        ylim(axSpec, [0 fTop]);
+        xlim(axSpec, [0 max(numel(S.call)/fs, tt(end))]);
+        xlabel(axSpec, 'Time (s)'); ylabel(axSpec, 'Frequency (Hz)');
+        title(axSpec, 'Spectrogram (dB, 60 dB range)');
+    end
+
+    function doImportTemplate()
+        [file, pth] = uigetfile({'*.csv;*.txt;*.mat;*.wav','Template files (*.csv, *.txt, *.mat, *.wav)'; '*.*','All files'}, ...
+            'Select call template');
+        figure(fig);
+        if isequal(file, 0), updateStatus('Template import cancelled'); return; end
         try
-            f = iwah_make_single_run_report(S.H, "final", S.metric);
-            f.Name = 'iWAH Report';
-            movegui(f,'center');
-
-            choice = uiconfirm(fig,'Save report figure as PNG?','Save report?', ...
-                'Options',{'Yes','No'},'DefaultOption',2,'CancelOption',2);
-            if strcmp(choice,'Yes')
-                [file,path] = uiputfile({'*.png','PNG (*.png)'}, 'Save report', 'iwah_report.png');
-                if ~isequal(file,0)
-                    exportgraphics(f, fullfile(path,file), 'Resolution', 180);
-                    updateStatus(sprintf('Report saved: %s', file));
-                else
-                    updateStatus('Report not saved');
-                end
+            tpl = WhaleCallLibrary.loadTemplate(fullfile(pth, file));
+            if strcmp(tpl.guess, 'contour'), defOpt = 1; else, defOpt = 2; end
+            if isfinite(tpl.fs) && endsWith(lower(file), '.wav')
+                choice = 'Waveform samples';
             else
-                updateStatus('Report generated');
+                msg = sprintf(['Loaded %d values (range %.4g to %.4g).\n\n' ...
+                    'How should they be interpreted?\n' ...
+                    '- Frequency contour: values are Hz, stretched over the Call duration.\n' ...
+                    '- Waveform samples: pressure samples at the Template sample rate (%s).'], ...
+                    numel(tpl.values), min(tpl.values), max(tpl.values), fsText());
+                choice = uiconfirm(fig, msg, 'Template type', 'Options', {'Frequency contour','Waveform samples','Cancel'}, ...
+                    'DefaultOption', defOpt, 'CancelOption', 3);
             end
+            if strcmp(choice, 'Cancel'), updateStatus('Template import cancelled'); return; end
+            S.callTemplate = tpl;
+            if strcmp(choice, 'Frequency contour')
+                CTRL.callPreset.Value = 'Imported template - freq. contour';
+                if max(tpl.values) >= CTRL.fs.Value/2
+                    CTRL.fs.Value = ceil(2.5*max(tpl.values));
+                    updateStatus(sprintf('Sample rate raised to %.0f Hz to cover the contour.', CTRL.fs.Value));
+                end
+                lblTpl.Text = sprintf('Contour: %s (%d points, %.4g-%.4g Hz)', file, numel(tpl.values), min(tpl.values), max(tpl.values));
+            else
+                CTRL.callPreset.Value = 'Imported template - waveform';
+                S.callTemplate.amp = [];
+                if isfinite(tpl.fs)
+                    lblTpl.Text = sprintf('Waveform: %s (%d samples at %.0f Hz)', file, numel(tpl.values), tpl.fs);
+                else
+                    lblTpl.Text = sprintf('Waveform: %s (%d samples at %s)', file, numel(tpl.values), fsText());
+                end
+            end
+            setPresetNote();
+            updateCall(true);
+            clearResults();
+            refreshEnvPlots();
+            updateStatus(sprintf('Template loaded: %s', file));
         catch ME
-            uialert(fig, ME.message, 'Report Error');
-            updateStatus('Report failed');
+            uialert(fig, ME.message, 'Template error');
+        end
+        function s = fsText()
+            if CTRL.tplFs.Value > 0, s = sprintf('%.0f Hz', CTRL.tplFs.Value);
+            else, s = sprintf('fs = %.0f Hz', CTRL.fs.Value);
+            end
         end
     end
 
-    function doLoadGeometry()
+%% ====================================================================
+%  Array design tab
+%% ====================================================================
+    function doGeneratePattern()
         try
-            [file, path] = uigetfile({'*.csv','CSV Files (*.csv)';'*.*','All Files'},...
-                'Select Microphone Geometry CSV File');
-            if isequal(file,0), updateStatus('Load cancelled'); return; end
-
-            fullpath = fullfile(path, file);
-            data = readmatrix(fullpath);
-
-            if size(data,2) ~= 3
-                uialert(fig, 'CSV must have exactly 3 columns (x, y, z)', 'Invalid Format');
-                return;
+            Mn = HydrophoneGeometry.pattern(CTRL.patName.Value, patternOpts());
+            S.M = Mn;
+            % relax the optimiser constraints so the new design is valid
+            note = '';
+            Dp = HydrophoneGeometry.pairDist(Mn); Dp(1:size(Dp,1)+1:end) = inf;
+            rmaxP = max(sqrt(sum((Mn(:,1:2) - mean(Mn(:,1:2),1)).^2, 2)));
+            if min(Dp(:)) < CTRL.minPair.Value
+                CTRL.minPair.Value = max(0, floor(0.9*min(Dp(:))*1000)/1000);
+                note = sprintf(' Min spacing set to %.3g m.', CTRL.minPair.Value);
             end
-            if size(data,1) < 4
-                uialert(fig, 'Need at least 4 microphones', 'Too Few Mics');
-                return;
+            if rmaxP > CTRL.Lmax.Value
+                CTRL.Lmax.Value = min(1e5, max(1, ceil(1.25*rmaxP*1000)/1000));
+                note = sprintf('%s Lmax set to %.3g m.', note, CTRL.Lmax.Value);
             end
-            if size(data,1) > 24
-                uialert(fig, 'Maximum 24 microphones supported', 'Too Many Mics');
-                return;
+            clearResults();
+            refreshArrayTab(); refreshEnvPlots(); refreshFieldPlot();
+            [ok, msg] = HydrophoneGeometry.isValid(S.M, CTRL.Lmax.Value, CTRL.minPair.Value);
+            if ok, updateStatus(sprintf('Generated %d hydrophones (%s).%s', size(S.M,1), CTRL.patName.Value, note));
+            else, updateStatus(['Generated pattern violates a constraint: ' msg]);
             end
-            if any(~isfinite(data(:)))
-                uialert(fig, 'CSV contains invalid values (NaN or Inf)', 'Invalid Values');
-                return;
-            end
-
-            S.M = data;
-            edN.Value = size(S.M, 1);
-            S.M = S.M - mean(S.M, 1);
-
-            if ~isValidGeometry(S.M, edLmax.Value, edMinPair.Value)
-                uialert(fig, sprintf(['Loaded geometry violates constraints.\n' ...
-                    'Consider adjusting Lmax (%.3f m) or Min Pair Dist (%.3f m).'], ...
-                    edLmax.Value, edMinPair.Value), ...
-                    'Geometry Constraint Violation','Icon','warning');
-            end
-
-            resetResults();
-            ddMic.Items = compose('%d',1:size(S.M,1));
-            ddMic.Value = '1';
-            updateSliderLimits();
-            syncMicToControls();
-            refreshPlot(true);
-            updateStatsTable();
-            updateStatus(sprintf('Loaded %d mics from %s', size(S.M,1), file));
         catch ME
-            uialert(fig, ME.message, 'Load Error');
-            updateStatus('Load failed');
+            uialert(fig, ME.message, 'Pattern error');
         end
     end
 
-    function doSaveGeometry()
-        if isempty(S.M)
-            uialert(fig, 'No geometry to save', 'No Geometry');
+    function onTableEdit(src, evt)
+        D = src.Data;
+        Dv = D(:,2:4);
+        if any(~isfinite(Dv(:)))
+            src.Data = tableData();
+            updateStatus('Invalid value - edit reverted.');
             return;
         end
-        try
-            [file, path] = uiputfile({'*.csv','CSV Files (*.csv)'},...
-                'Save Microphone Geometry', 'mic_geometry.csv');
-            if isequal(file,0), updateStatus('Save cancelled'); return; end
-            writematrix(S.M, fullfile(path, file));
-            updateStatus(sprintf('Saved %d mics to %s', size(S.M,1), file));
-        catch ME
-            uialert(fig, ME.message, 'Save Error');
-            updateStatus('Save failed');
+        S.M = D(:, 2:4);
+        clearResults();
+        refreshArrayTab(); refreshEnvPlots(); refreshFieldPlot();
+        if ~isempty(evt) && isprop(evt, 'Indices') && ~isempty(evt.Indices)
+            updateStatus(sprintf('Hydrophone %d updated.', evt.Indices(1)));
         end
     end
 
-    function doRandomise()
-        try
-            N = round(edN.Value);
-            ddMic.Items = compose('%d',1:N);
-            ddMic.Value = '1';
-
-            Lmax = edLmax.Value;
-            minD = edMinPair.Value;
-
-            S.M = randomArrayNonCoplanar(N, Lmax, minD);
-            S.M = S.M - mean(S.M,1);
-
-            resetResults();
-            updateSliderLimits();
-            updateSliderTicks();
-            syncMicToControls();
-            refreshPlot(true);
-            updateStatsTable();
-            updateStatus('Geometry randomised');
-        catch ME
-            uialert(fig, ME.message, 'Randomise Error');
-            updateStatus('Randomise failed');
-        end
+    function onTableSelect(~, evt)
+        if isempty(evt.Indices), S.selRows = []; else, S.selRows = unique(evt.Indices(:,1))'; end
     end
 
-    function doRunWAH()
+    function D = tableData()
+        n = size(S.M, 1);
+        D = [(1:n)' S.M];
+    end
+
+    function doAddHyd()
+        if isempty(S.M), S.M = zeros(0,3); end
+        if size(S.M,1) >= 64, updateStatus('Maximum of 64 hydrophones.'); return; end
         if isempty(S.M)
-            uialert(fig,'No geometry. Click Randomise or Load CSV first.','Missing Geometry');
-            return;
+            p = [0 0 CTRL.patZ.Value];
+        else
+            c = mean(S.M(:,1:2), 1);
+            rmax = max(sqrt(sum((S.M(:,1:2) - c).^2, 2)));
+            p = [c(1) + max(rmax, CTRL.minPair.Value)*0.5, c(2) + max(rmax, CTRL.minPair.Value)*0.5, S.M(end,3)];
         end
-        updateStatus('Running WAH...');
-        drawnow;
+        S.M = [S.M; p];
+        clearResults(); refreshArrayTab(); refreshFieldPlot();
+        updateStatus(sprintf('Added H%d - edit its coordinates in the table.', size(S.M,1)));
+    end
 
+    function doRemoveHyd()
+        if isempty(S.selRows), updateStatus('Select a cell in the row(s) to remove first.'); return; end
+        if size(S.M,1) - numel(S.selRows) < 3, updateStatus('At least 3 hydrophones are required.'); return; end
+        S.M(S.selRows, :) = [];
+        S.selRows = [];
+        clearResults(); refreshArrayTab(); refreshFieldPlot();
+        updateStatus('Hydrophone(s) removed.');
+    end
+
+    function doRecentre()
+        if isempty(S.M), return; end
+        S.M = HydrophoneGeometry.recentreXY(S.M);
+        clearResults(); refreshArrayTab(); refreshFieldPlot();
+        updateStatus('Array re-centred on its horizontal centroid.');
+    end
+
+    function doRenumber()
+        refreshArrayTab();
+    end
+
+    function doImportGeometry()
+        [file, pth] = uigetfile({'*.csv;*.txt','Geometry CSV (*.csv, *.txt)'; '*.*','All files'}, 'Import hydrophone geometry');
+        figure(fig);
+        if isequal(file, 0), updateStatus('Import cancelled'); return; end
+        try
+            [Mn, meta] = HydrophoneGeometry.readCSV(fullfile(pth, file));
+            if size(Mn,1) > 64, error('Maximum 64 hydrophones supported.'); end
+            S.M = Mn;
+            if isfinite(meta.ox) || ~isempty(meta.mode)
+                choice = uiconfirm(fig, sprintf(['The file contains placement metadata (origin %.1f, %.1f m; mode "%s").\n' ...
+                    'Apply it to the Placement settings?'], meta.ox, meta.oy, meta.mode), 'Apply placement?', ...
+                    'Options', {'Apply','Keep current'}, 'DefaultOption', 1, 'CancelOption', 2);
+                if strcmp(choice, 'Apply')
+                    if isfinite(meta.ox), CTRL.ox.Value = meta.ox; end
+                    if isfinite(meta.oy), CTRL.oy.Value = meta.oy; end
+                    if ~isempty(meta.mode), CTRL.placeMode.Value = placeLabel(meta.mode); end
+                    if isfinite(meta.yaw), CTRL.yaw.Value = wrapDeg(meta.yaw); end
+                    if isfinite(meta.pitch), CTRL.pitch.Value = wrapDeg(meta.pitch); end
+                    if isfinite(meta.roll), CTRL.roll.Value = wrapDeg(meta.roll); end
+                    if isfinite(meta.refDepth), CTRL.refDepth.Value = meta.refDepth; end
+                    if isfinite(meta.lat0) && isempty(strtrim(CTRL.lat0.Value))
+                        CTRL.lat0.Value = sprintf('%.8f', meta.lat0); CTRL.lon0.Value = sprintf('%.8f', meta.lon0);
+                        onOriginChanged();
+                    end
+                end
+            end
+            clearResults(); refreshAll();
+            [ok, msg] = HydrophoneGeometry.isValid(S.M, CTRL.Lmax.Value, CTRL.minPair.Value);
+            if ok, updateStatus(sprintf('Imported %d hydrophones from %s.', size(S.M,1), file));
+            else, updateStatus(sprintf('Imported %d hydrophones - note: %s', size(S.M,1), msg));
+            end
+        catch ME
+            uialert(fig, ME.message, 'Import error');
+        end
+    end
+
+    function doExportGeometry()
+        if isempty(S.M), uialert(fig, 'No geometry to export.', 'Nothing to export'); return; end
+        [file, pth] = uiputfile({'*.csv','CSV (*.csv)'}, 'Export hydrophone geometry', ...
+            sprintf('hydrophones_%dch_%s.csv', size(S.M,1), datestr(now, 'yyyymmdd_HHMMSS')));
+        figure(fig);
+        if isequal(file, 0), updateStatus('Export cancelled'); return; end
         try
             P = readParams();
-            [loc, gridPts] = buildLocaliserAndGrid(P);
-
-            [stats, diag] = evaluateFoA_full(loc, gridPts, P.threshold_cm, ...
-                P.minDistToAnyMic, P.epsDist, P.failPenalty_cm, P.c);
-
-            % Update state
-            S.gridPts = gridPts;
-            S.lastStats = stats;
-            S.diag = diag;
-
-            % Create history with baseline only
-            initHistoryIfNeeded(P);
-            logIter(0, S.M, NaN, NaN, [], P, readOPT(), P.quadrants, gridPts, stats, diag, scoreJ(stats, P.lambdaMean, P.failPenalty_cm), [], true, "WAH baseline");
-
-            updateStatsTable();
-            refreshPlot(false);
-            updateStatus(sprintf('WAH done: %.1f%% pass', 100*stats.passRate));
+            HydrophoneGeometry.writeCSV(fullfile(pth, file), S.M, placement(P), currentEnvSafe(P));
+            updateStatus(sprintf('Saved %d hydrophones to %s (relative + absolute coordinates).', size(S.M,1), file));
         catch ME
-            uialert(fig, ME.message, 'WAH Error');
-            updateStatus('WAH failed');
+            uialert(fig, ME.message, 'Export error');
         end
     end
 
-    function doOptimiser()
-        if isempty(S.M)
-            uialert(fig,'No geometry. Click Randomise or Load CSV first.','Missing Geometry');
+    function env = currentEnvSafe(P)
+        try
+            env = currentEnv(P);
+        catch
+            env = S.env; env.flatDepth = P.flatDepth;
+        end
+    end
+
+    function goEvaluate()
+        tg.SelectedTab = tabFoA;
+        doRunWAH();
+    end
+
+    function refreshArrayTab()
+        if isempty(S.M), tblHyd.Data = zeros(0,4); return; end
+        tblHyd.Data = tableData();
+        P = readParamsSafe();
+        switch P.placeMode
+            case 'seafloor', tblHyd.ColumnName = {'#','x (m)','y (m)','z HAB (m)'};
+            case 'frame',    tblHyd.ColumnName = {'#','x (m)','y (m)','z above base (m)'};
+            otherwise,       tblHyd.ColumnName = {'#','x (m)','y (m)','z up (m)'};
+        end
+        env = currentEnvSafe(P);
+        A = placement(P);
+        Hn = HydrophoneGeometry.toAbsolute(S.M, A, env);
+        W = [Hn(:,1) - P.ox, Hn(:,2) - P.oy];          % deployed plan offsets
+        n = size(S.M,1);
+        cmap = lines(n);
+
+        % ---- plan view (after orientation) ----
+        ax = axArrPlan;
+        cla(ax); resetAxesModes(ax); hold(ax, 'on'); grid(ax, 'on'); axis(ax, 'equal');
+        c = mean(W, 1);
+        dxy = abs(W - c);
+        ext = max([max(dxy(:)), CTRL.minPair.Value, 0.5]);
+        if cbArrLmax.Value, ext = max(ext, CTRL.Lmax.Value); end
+        lim = 1.2*ext;
+        if cbArrBathy.Value && ~isempty(env.bathy)
+            [Xc, Yc, Dc] = bathyWindow(env.bathy, P.ox + c(1) + [-lim lim], P.oy + c(2) + [-lim lim]);
+            if ~isempty(Dc) && numel(unique(round(Dc(:)))) > 1
+                [cc, hc] = contour(ax, Xc - P.ox, Yc - P.oy, Dc, 8, 'LineColor', [0.7 0.7 0.75]);
+                try, clabel(cc, hc, 'Color', [0.5 0.5 0.55], 'FontSize', 8); catch, end
+            end
+        end
+        if cbArrLmax.Value
+            a = linspace(0, 2*pi, 181);
+            plot(ax, c(1) + CTRL.Lmax.Value*cos(a), c(2) + CTRL.Lmax.Value*sin(a), '--', 'Color', [0.6 0.6 0.6]);
+        end
+        Dm = HydrophoneGeometry.pairDist(Hn);
+        if cbPairLines.Value && n <= 16
+            for a1 = 1:n
+                for a2 = a1+1:n
+                    plot(ax, W([a1 a2],1), W([a1 a2],2), '-', 'Color', [0.75 0.82 0.9]);
+                    if n <= 8
+                        text(ax, mean(W([a1 a2],1)), mean(W([a1 a2],2)), fmtLen(Dm(a1,a2)), ...
+                            'FontSize', 8, 'Color', [0.35 0.45 0.6], 'HorizontalAlignment', 'center', 'BackgroundColor', [1 1 1]);
+                    end
+                end
+            end
+        end
+        scatter(ax, W(:,1), W(:,2), 90, cmap, 'filled', 'MarkerEdgeColor', 'k', 'LineWidth', 1.2, 'Marker', 'v');
+        for q = 1:n
+            text(ax, W(q,1), W(q,2), sprintf('   H%d', q), 'FontWeight', 'bold', 'Color', cmap(q,:)*0.8);
+        end
+        plot(ax, 0, 0, 'p', 'MarkerSize', 12, 'MarkerFaceColor', 'r', 'MarkerEdgeColor', 'k');
+        Rb = HydrophoneGeometry.orientMatrix(P.yaw, P.pitch, P.roll);
+        if strcmp(P.placeMode, 'seafloor'), Rb = HydrophoneGeometry.orientMatrix(P.yaw, 0, 0); end
+        ah = 0.35*ext;
+        plot(ax, [0 Rb(1,1)]*ah, [0 Rb(2,1)]*ah, '-', 'Color', [0.85 0.2 0.15], 'LineWidth', 1.5);
+        plot(ax, [0 Rb(1,2)]*ah, [0 Rb(2,2)]*ah, '-', 'Color', [0.1 0.6 0.2], 'LineWidth', 1.5);
+        text(ax, Rb(1,1)*ah, Rb(2,1)*ah, ' body x', 'Color', [0.85 0.2 0.15], 'FontSize', 8);
+        text(ax, Rb(1,2)*ah, Rb(2,2)*ah, ' body y', 'Color', [0.1 0.6 0.2], 'FontSize', 8);
+        xlim(ax, c(1) + [-lim lim]); ylim(ax, c(2) + [-lim lim]);
+        xlabel(ax, 'East of origin (m)'); ylabel(ax, 'North of origin (m)');
+        title(ax, sprintf('Plan view as deployed (yaw %.1f, pitch %.1f, roll %.1f deg) - origin (%.0f, %.0f) m', ...
+            P.yaw, P.pitch, P.roll, P.ox, P.oy));
+        hold(ax, 'off');
+
+        % ---- 3-D view (world offsets, elevation relative to seafloor at origin) ----
+        ax = axArrSide;
+        cla(ax); resetAxesModes(ax); hold(ax, 'on'); grid(ax, 'on');
+        wd0 = OceanEnvironment.waterDepth(env, P.ox, P.oy);
+        zRel = Hn(:,3) + wd0;                          % height above seafloor at the origin
+        gx = c(1) + linspace(-lim, lim, 25); gy = c(2) + linspace(-lim, lim, 25);
+        [GX, GY] = meshgrid(gx, gy);
+        GZ = -OceanEnvironment.waterDepth(env, P.ox + GX, P.oy + GY) + wd0;
+        surf(ax, GX, GY, GZ, 'FaceColor', [0.82 0.76 0.64], 'EdgeColor', 'none', 'FaceAlpha', 0.45);
+        if n <= 12
+            for a1 = 1:n
+                for a2 = a1+1:n
+                    plot3(ax, W([a1 a2],1), W([a1 a2],2), zRel([a1 a2]), '-', 'Color', [0.6 0.7 0.85]);
+                end
+            end
+        end
+        scatter3(ax, W(:,1), W(:,2), zRel, 70, cmap, 'filled', 'MarkerEdgeColor', 'k');
+        for q = 1:n
+            text(ax, W(q,1), W(q,2), zRel(q), sprintf('  H%d', q), 'FontSize', 8, 'Color', cmap(q,:)*0.8);
+        end
+        z0 = 0;                                        % body origin height above seafloor@origin
+        if strcmp(P.placeMode, 'fixed'), z0 = wd0 - P.refDepth; end
+        cols = {[0.85 0.2 0.15], [0.1 0.6 0.2], [0.15 0.35 0.85]};
+        for q = 1:3
+            plot3(ax, [0 Rb(1,q)]*ah, [0 Rb(2,q)]*ah, z0 + [0 Rb(3,q)]*ah, '-', 'Color', cols{q}, 'LineWidth', 2);
+        end
+        vSpan = max(zRel) - min([zRel; GZ(:)]);
+        if vSpan > 0.02*(2*lim)
+            axis(ax, 'equal'); ttl = '3-D view (true scale)';
+        else
+            ttl = '3-D view (vertical exaggerated)';
+        end
+        view(ax, 35, 25);
+        xlabel(ax, 'East (m)'); ylabel(ax, 'North (m)'); zlabel(ax, 'Height above seafloor at origin (m)');
+        title(ax, [ttl ' - red/green/blue = body x/y/z']);
+        hold(ax, 'off');
+
+        % ---- tables and stats ----
+        tblWorld.Data = [(1:n)' round(W(:,1),3) round(W(:,2),3) round(zRel,3) round(-Hn(:,3),3)];
+        tblWorld.ColumnName = {'#','East (m)','North (m)','Above seafloor@origin (m)','Depth (m)'};
+        tblPair.Data = round(Dm, 3);
+        tblPair.ColumnName = compose('H%d', 1:n);
+        tblPair.RowName = compose('H%d', 1:n);
+        Dn = Dm; Dn(1:n+1:end) = inf;
+        rr = sqrt(sum((W - c).^2, 2));
+        [ok, msg] = HydrophoneGeometry.isValid(S.M, CTRL.Lmax.Value, CTRL.minPair.Value);
+        bad = HydrophoneGeometry.belowSeabed(Hn, env);
+        if any(bad)
+            lblArrValid.Text = sprintf('! H%s below the seabed (check pitch/roll)', strjoin(compose('%d', find(bad)'), ', H'));
+            lblArrValid.FontColor = [0.8 0.2 0.1];
+        elseif ok
+            lblArrValid.Text = ['Constraints OK ' msg]; lblArrValid.FontColor = [0.1 0.55 0.2];
+        else
+            lblArrValid.Text = ['! ' msg]; lblArrValid.FontColor = [0.8 0.2 0.1];
+        end
+        lblArrStats.Text = sprintf(['%d hydrophones  |  aperture (max 3-D pair) %s  |  min spacing %s\n' ...
+            'max horizontal radius from centroid %s  |  depths %.2f - %.2f m'], n, fmtLen(max(Dm(:))), ...
+            fmtLen(min(Dn(:))), fmtLen(max(rr)), min(-Hn(:,3)), max(-Hn(:,3)));
+        if wd0 <= 0
+            lblArrDepth.Text = sprintf('Origin is on LAND (elevation %.0f m) - move the array.', -wd0);
+        else
+            lblArrDepth.Text = sprintf('Water depth at origin: %.1f m', wd0);
+        end
+    end
+
+    function s = fmtLen(v)
+        if v < 10, s = sprintf('%.3f m', v); elseif v < 1000, s = sprintf('%.1f m', v); else, s = sprintf('%.0f m', v); end
+    end
+
+    function P = readParamsSafe()
+        P = readParams(false);
+    end
+
+%% ====================================================================
+%  Environment tab
+%% ====================================================================
+    function doLoadBathy()
+        [file, pth] = uigetfile({'*.nc;*.grd;*.nc4;*.csv;*.txt;*.xyz;*.dat;*.mat', ...
+            'Bathymetry (*.nc, *.grd, *.csv, *.txt, *.xyz, *.mat)'; '*.*','All files'}, 'Load bathymetry');
+        figure(fig);
+        if isequal(file, 0), updateStatus('Bathymetry load cancelled'); return; end
+        try
+            updateStatus('Loading bathymetry...'); drawnow;
+            [lon0, lat0] = originLonLat();
+            B = OceanEnvironment.loadBathymetry(fullfile(pth, file), lon0, lat0);
+            S.env.bathy = B;
+            if B.isGeo && ~(isfinite(lat0) && isfinite(lon0))
+                CTRL.lat0.Value = sprintf('%.6f', B.lat0);
+                CTRL.lon0.Value = sprintf('%.6f', B.lon0);
+            end
+            if B.isGeo, S.env.lat0 = B.lat0; S.env.lon0 = B.lon0; end
+            updateBathyInfo();
+            clearResults(); refreshAll();
+            updateStatus(sprintf('Bathymetry loaded: %s', file));
+        catch ME
+            uialert(fig, ME.message, 'Bathymetry error');
+            updateStatus('Bathymetry load failed');
+        end
+    end
+
+    function updateBathyInfo()
+        B = S.env.bathy;
+        if isempty(B)
+            lblBathy.Text = 'No bathymetry loaded - flat bottom.';
             return;
         end
+        [~, nm, ex] = fileparts(B.file);
+        if B.isGeo, geo = sprintf('geographic, origin %.4f N %.4f E', B.lat0, B.lon0); else, geo = 'local metres'; end
+        if B.signFlipped, sgn = 'elevation -> depth'; else, sgn = 'depth'; end
+        lblBathy.Text = sprintf('%s%s (%s; %s)\nx %.1f..%.1f km, y %.1f..%.1f km, depth %.0f..%.0f m', nm, ex, geo, sgn, ...
+            min(B.x)/1e3, max(B.x)/1e3, min(B.y)/1e3, max(B.y)/1e3, B.minDepth, B.maxDepth);
+    end
 
-        % Always start a fresh run history for optimiser runs
-        S.H = [];
-        S.runInfo = [];
-        btnReport.Enable = 'off';      % disable until optimiser completes
-        btnExportRun.Enable = 'off';   % disable until optimiser completes
+    function doFlipBathy()
+        if isempty(S.env.bathy), updateStatus('No bathymetry loaded.'); return; end
+        S.env.bathy = OceanEnvironment.flipBathySign(S.env.bathy);
+        updateBathyInfo(); clearResults(); refreshAll();
+        updateStatus('Bathymetry depth sign flipped.');
+    end
 
-        S.stopFlag = false;
-        btnStop.Enable = 'on';
-        btnOpt.Enable = 'off';
-        btnRun.Enable = 'off';
-        btnRand.Enable = 'off';
-        btnLoad.Enable = 'off';
+    function doClearBathy()
+        S.env.bathy = [];
+        updateBathyInfo(); clearResults(); refreshAll();
+        updateStatus('Bathymetry cleared - using flat bottom.');
+    end
 
-        updateStatus('Optimiser running...');
-        drawnow;
+    function [lon0, lat0] = originLonLat()
+        lat0 = str2double(CTRL.lat0.Value); lon0 = str2double(CTRL.lon0.Value);
+        if ~isfinite(lat0) || ~isfinite(lon0), lat0 = NaN; lon0 = NaN; end
+    end
 
+    function onOriginChanged()
+        [lon0, lat0] = originLonLat();
+        if ~isfinite(lat0)
+            if ~isempty(S.env.bathy) && S.env.bathy.isGeo
+                S.env.lat0 = S.env.bathy.lat0; S.env.lon0 = S.env.bathy.lon0;
+                CTRL.lat0.Value = sprintf('%.6f', S.env.lat0); CTRL.lon0.Value = sprintf('%.6f', S.env.lon0);
+            else
+                S.env.lat0 = NaN; S.env.lon0 = NaN;
+            end
+            return;
+        end
+        S.env.lat0 = lat0; S.env.lon0 = lon0;
+        try
+            if ~isempty(S.env.bathy) && S.env.bathy.isGeo
+                S.env.bathy = OceanEnvironment.loadBathymetry(S.env.bathy.file, lon0, lat0);
+                updateBathyInfo();
+            end
+            if ~isempty(S.ncom)
+                S.ncom = OceanEnvironment.loadNCOM(S.ncom.file, lon0, lat0, round(CTRL.ncomT.Value));
+            end
+            updateStatus('Geographic origin changed - grids re-projected.');
+        catch ME
+            updateStatus(['Re-projection failed: ' ME.message]);
+        end
+    end
+
+    function doLoadProfile()
+        [file, pth] = uigetfile({'*.csv;*.txt;*.dat;*.mat','Sound speed profile (*.csv, *.txt, *.mat)'; '*.*','All files'}, ...
+            'Load 1-D sound speed profile');
+        figure(fig);
+        if isequal(file, 0), updateStatus('Profile load cancelled'); return; end
+        try
+            S.sspProfile = OceanEnvironment.loadProfile(fullfile(pth, file));
+            CTRL.sspModel.Value = '1-D profile (file)';
+            lblSSP.Text = sprintf('Profile %s: %d levels to %.0f m, c %.1f-%.1f m/s (%s)', file, numel(S.sspProfile.z), ...
+                max(S.sspProfile.z), min(S.sspProfile.c), max(S.sspProfile.c), S.sspProfile.note);
+            clearResults(); refreshEnvPlots();
+            updateStatus(sprintf('Sound speed profile loaded: %s', file));
+        catch ME
+            uialert(fig, ME.message, 'Profile error');
+        end
+    end
+
+    function doLoadNCOM()
+        [file, pth] = uigetfile({'*.nc;*.nc4;*.cdf','NetCDF (*.nc, *.nc4)'; '*.*','All files'}, 'Load NCOM / HYCOM NetCDF');
+        figure(fig);
+        if isequal(file, 0), updateStatus('NCOM load cancelled'); return; end
+        try
+            updateStatus('Loading NCOM field (this can take a moment)...'); drawnow;
+            [lon0, lat0] = originLonLat();
+            S.ncom = OceanEnvironment.loadNCOM(fullfile(pth, file), lon0, lat0, round(CTRL.ncomT.Value));
+            if ~isfinite(lat0)
+                CTRL.lat0.Value = sprintf('%.6f', S.ncom.lat0); CTRL.lon0.Value = sprintf('%.6f', S.ncom.lon0);
+                S.env.lat0 = S.ncom.lat0; S.env.lon0 = S.ncom.lon0;
+            end
+            CTRL.sspModel.Value = '3-D field (NCOM NetCDF)';
+            lblSSP.Text = sprintf('NCOM %s: %d x %d profiles, %d levels to %.0f m; %s', file, numel(S.ncom.lon), ...
+                numel(S.ncom.lat), numel(S.ncom.z), max(S.ncom.z), S.ncom.note);
+            clearResults(); refreshEnvPlots();
+            updateStatus(sprintf('NCOM field loaded: %s', file));
+        catch ME
+            uialert(fig, ME.message, 'NCOM error');
+            updateStatus('NCOM load failed');
+        end
+    end
+
+    function refreshEnvPlots()
+        P = readParamsSafe();
+        env = currentEnvSafe(P);
+        % --- bathymetry map ---
+        ax = axBathy;
+        cla(ax); colorbar(ax, 'off');
+        resetAxesModes(ax);
+        hold(ax, 'on');
+        if ~isempty(env.bathy)
+            B = env.bathy;
+            [xd, yd, Dd] = decimateForPlot(B, 400);
+            imagesc(ax, xd/1e3, yd/1e3, Dd);
+            ax.YDir = 'normal';
+            colormap(ax, flipud(parula));
+            cb = colorbar(ax); cb.Label.String = 'Water depth (m)';
+            try
+                contour(ax, xd/1e3, yd/1e3, Dd, [0 0], 'LineColor', 'k', 'LineWidth', 1.5);
+            catch
+            end
+            ttl = 'Bathymetry';
+        else
+            ttl = sprintf('Flat bottom (%.0f m)', env.flatDepth);
+        end
+        drawFieldOutline(ax, P, 'k');
+        if ~isempty(S.M)
+            Hn = HydrophoneGeometry.toAbsolute(S.M, placement(P), env);
+            plot(ax, Hn(:,1)/1e3, Hn(:,2)/1e3, 'v', 'MarkerFaceColor', 'r', 'MarkerEdgeColor', 'k', 'MarkerSize', 7);
+        end
+        axis(ax, 'equal'); grid(ax, 'on');
+        xlabel(ax, 'East (km)'); ylabel(ax, 'North (km)'); title(ax, ttl);
+        if isempty(env.bathy)
+            Rv = max(CTRL.R.Value, 1000)/1e3*1.1;
+            xlim(ax, CTRL.fcx.Value/1e3 + [-Rv Rv]); ylim(ax, CTRL.fcy.Value/1e3 + [-Rv Rv]);
+        end
+        hold(ax, 'off');
+
+        % --- sound speed profiles ---
+        ax = axSSP;
+        cla(ax); hold(ax, 'on'); grid(ax, 'on');
+        dmax = OceanEnvironment.maxWaterDepth(env);
+        hL = gobjects(0); leg = {};
+        if strcmp(env.ssp.type, 'field')
+            fld = env.ssp.field;
+            nx = numel(fld.x); ny = numel(fld.y);
+            pick = unique(round(linspace(1, nx*ny, min(25, nx*ny))));
+            for q = pick
+                [ix, iy] = ind2sub([nx ny], q);
+                plot(ax, squeeze(fld.C(ix, iy, :)), fld.z, '-', 'Color', [0.75 0.75 0.8]);
+            end
+            pr = OceanEnvironment.profileAt(env, P.ox, P.oy);
+            hL(end+1) = plot(ax, pr.c, pr.z, 'b-', 'LineWidth', 2);
+            leg{end+1} = 'truth at array';
+        else
+            zz = linspace(0, dmax, 200);
+            cc = interp1(env.ssp.Sz, env.ssp.cz, min(zz, env.ssp.Sz(end)));
+            hL(end+1) = plot(ax, cc, zz, 'b-', 'LineWidth', 2);
+            leg{end+1} = 'truth';
+        end
+        try
+            if strcmp(P.locSSPMode, 'constant')
+                hL(end+1) = plot(ax, [P.cLoc P.cLoc], [0 dmax], 'r--', 'LineWidth', 1.5);
+            else
+                pr = OceanEnvironment.profileAt(env, P.ox, P.oy);
+                hL(end+1) = plot(ax, pr.c, pr.z, 'r--', 'LineWidth', 1.5);
+            end
+            leg{end+1} = 'localiser';
+        catch
+        end
+        ax.YDir = 'reverse';
+        ylim(ax, [0 max(dmax, 10)]);
+        xlabel(ax, 'Sound speed (m/s)'); ylabel(ax, 'Depth (m)');
+        title(ax, 'Sound speed');
+        legend(ax, hL, leg, 'Location', 'southwest');
+        hold(ax, 'off');
+
+        % --- SNR vs range (and ray fan) ---
+        ax = axSNR;
+        cla(ax); legend(ax, 'off'); hold(ax, 'on'); grid(ax, 'on');
+        rmax = max(1.2*(CTRL.R.Value + hypot(CTRL.fcx.Value - CTRL.ox.Value, CTRL.fcy.Value - CTRL.oy.Value)), 2000);
+        rr = logspace(1, log10(rmax), 300);
+        fc = mean(S.band);
+        if ~isfinite(fc), fc = mean([CTRL.f0.Value CTRL.f1.Value]); end
+        dList = parseDepths(CTRL.depths.Value);
+        RP = rayPreview(P, env, rmax);
+        hS = gobjects(0); labS = {};
+        if strcmp(P.snrMode, 'fixed')
+            snr = P.snrFixed*ones(size(rr));
+        else
+            snr = CTRL.SL.Value - OceanEnvironment.transmissionLoss(env, rr, fc) - CTRL.NL.Value;
+        end
+        isRay = strcmp(P.propModel, 'ray') && ~isempty(RP);
+        if isRay
+            hS(end+1) = plot(ax, rr/1e3, snr, '--', 'Color', [0.6 0.6 0.6]); labS{end+1} = 'straight-ray spreading law';
+            try
+                Sp = WhaleCallLocaliser.cachedPaths(RP.ssp, RP.D, RP.zr, dList(1), RP.o);
+                rl = linspace(10, rmax, 600);
+                TLr = inf(size(rl));
+                for q = 1:numel(rl)
+                    Aq = OceanRayModel.eigenrays(Sp, rl(q), fc, P.absorption);
+                    if ~isempty(Aq.t), TLr(q) = -10*log10(sum(10.^(-Aq.TL/10))); end
+                end
+                if strcmp(P.snrMode, 'fixed')
+                    snrR = P.snrFixed*ones(size(rl)); snrR(~isfinite(TLr)) = NaN;
+                else
+                    snrR = CTRL.SL.Value - TLr - CTRL.NL.Value;
+                end
+                hS(end+1) = plot(ax, rl/1e3, snrR, 'b-', 'LineWidth', 1.5);
+                labS{end+1} = sprintf('ray traced (H1 at %.0f m, source at %.0f m)', RP.zr, dList(1));
+                rr = rl; snr = snrR;
+            catch ME
+                title(ax, ['Ray SNR failed: ' ME.message]);
+            end
+        else
+            hS(end+1) = plot(ax, rr/1e3, snr, 'b-', 'LineWidth', 2); labS{end+1} = 'SNR';
+        end
+        hS(end+1) = plot(ax, [10 rmax]/1e3, CTRL.DT.Value*[1 1], 'r--'); labS{end+1} = 'detection threshold';
+        if isRay, ax.XScale = 'linear'; else, ax.XScale = 'log'; end
+        xlabel(ax, 'Horizontal range (km)'); ylabel(ax, 'Received SNR (dB)');
+        det = snr >= CTRL.DT.Value;
+        iDet = find(det, 1, 'last');
+        if isempty(iDet), dr = 'never detected';
+        elseif iDet == numel(rr), dr = sprintf('detected beyond %.0f km', rr(end)/1e3);
+        else, dr = sprintf('last detection ~%.1f km', rr(iDet)/1e3);
+        end
+        if isRay && any(~det(1:max(iDet,1))), dr = [dr ', with gaps (shadow zones)']; end
+        title(ax, sprintf('SNR vs range at %.4g Hz (SL %.0f, NL %.0f dB): %s', fc, CTRL.SL.Value, CTRL.NL.Value, dr));
+        legend(ax, hS, labS, 'Location', 'northeast');
+        hold(ax, 'off');
+
+        ax = axRays;
+        cla(ax); hold(ax, 'on'); grid(ax, 'on');
+        if isempty(RP)
+            title(ax, 'Ray paths: no hydrophones');
+        else
+            try
+                Fr = OceanRayModel.fan(RP.ssp, RP.D, RP.zr, RP.o);
+                ang = [0.5 1 2 3 5 8 12 17 25 35];
+                rmaxP = min(rmax, 100e3);
+                Pp = OceanRayModel.rayPaths(Fr, ang, rmaxP);
+                cm = parula(numel(Pp) + 2);
+                for q = 1:numel(Pp)
+                    plot(ax, Pp{q}(:,1)/1e3, Pp{q}(:,2), '-', 'Color', cm(q,:), 'LineWidth', 0.8);
+                end
+                plot(ax, [0 rmaxP]/1e3, RP.D*[1 1], '-', 'Color', [0.45 0.35 0.2], 'LineWidth', 2);
+                for q = 1:numel(dList)
+                    plot(ax, [0 rmaxP]/1e3, dList(q)*[1 1], ':', 'Color', [0.8 0.2 0.1]);
+                end
+                ax.YDir = 'reverse';
+                xlim(ax, [0 rmaxP/1e3]); ylim(ax, [0 RP.D*1.02]);
+                xlabel(ax, 'Range from H1 (km)'); ylabel(ax, 'Depth (m)');
+                title(ax, sprintf('Ray paths from H1 (%.0f m) at %s deg, up & down - profile at array, flat bottom %.0f m; dotted = source depths', ...
+                    RP.zr, strjoin(compose('%g', ang), '/'), RP.D));
+            catch ME
+                title(ax, ['Ray plot failed: ' ME.message]);
+            end
+        end
+        hold(ax, 'off');
+    end
+
+    function RP = rayPreview(P, env, rmax)
+        % Ray-model settings for the plots (same rules as the evaluation)
+        RP = [];
+        if isempty(S.M), return; end
+        try
+            Hn = HydrophoneGeometry.toAbsolute(S.M, placement(P), env);
+            dList = parseDepths(CTRL.depths.Value);
+            G = [P.fcx + [0; rmax*0.8] P.fcy*[1; 1] -max(dList)*[1; 1]];
+            cfgP = wahi_geometry_cfg(struct(), P, env, Hn, G);
+            RP = cfgP.locRay;
+            RP.o.rmax = 10000*ceil(rmax/10000);
+            RP.zr = -Hn(1,3);
+        catch
+            RP = [];
+        end
+    end
+
+%% ====================================================================
+%  Field tab: grid preview, plot
+%% ====================================================================
+    function updateDepthLayers()
+        d = parseDepths(CTRL.depths.Value);
+        items = [{'All depths'}, compose('%g m', d)];
+        cur = CTRL.dispLayer.Value;
+        CTRL.dispLayer.Items = items;
+        if any(strcmp(items, cur)), CTRL.dispLayer.Value = cur; else, CTRL.dispLayer.Value = 'All depths'; end
+    end
+
+    function refreshGridPreview()
         try
             P = readParams();
-            OPT = readOPT();
-
-            [locTemplate, gridPts] = buildLocaliserAndGrid(P);
-            paramTemplate = locTemplate.param;
-
-            initHistoryIfNeeded(P);
-            S.H.meta.OPT = OPT; % keep latest OPT
-            S.H.meta.Q = P.quadrants;
-
-            % Baseline eval (fresh instance)
-            paramBase = paramTemplate;
-            paramBase.mic_positions = S.M;
-            locBase = BatCallLocaliser(paramBase);
-
-            [bestStats, bestDiag] = evaluateFoA_full(locBase, gridPts, P.threshold_cm, ...
-                P.minDistToAnyMic, P.epsDist, P.failPenalty_cm, P.c);
-            bestJ = scoreJ(bestStats, P.lambdaMean, P.failPenalty_cm);
-
-            % Log baseline if history empty
-            if isempty(S.H.iter)
-                logIter(0, S.M, NaN, NaN, [], P, OPT, P.quadrants, gridPts, bestStats, bestDiag, bestJ, [], true, "baseline");
+            env = currentEnv(P);
+            F = struct('cx', P.fcx, 'cy', P.fcy, 'R', P.R, 'Rin', P.Rin, 'step', P.step, ...
+                'layout', P.layout, 'azFrom', P.azFrom, 'azTo', P.azTo, 'depths', P.depths);
+            [S.gridPts, S.gridInfo] = wahi_build_field_grid(F, env);
+            txt = sprintf('%d sources (%s per depth)', size(S.gridPts,1), strjoin(compose('%d', S.gridInfo.nPerDepth), ' / '));
+            if S.gridInfo.nDroppedSeabed > 0
+                txt = sprintf('%s; %d dropped (land / below seabed)', txt, S.gridInfo.nDroppedSeabed);
             end
-            acceptUpdate(bestStats, bestDiag, gridPts);
-
-            baseDirs = ruleSet2Dirs();
-
-            stall = 0;
-            for it = 1:OPT.maxIters
-                if S.stopFlag, break; end
-
-                Lmax = P.Lmax;
-                minD = P.minPairDist;
-                N = size(S.M,1);
-
-                if OPT.maxIters > 1
-                    stepFrac = max(OPT.minStepFrac, OPT.initStepFrac * (1 - (it-1)/(OPT.maxIters-1)));
-                else
-                    stepFrac = OPT.initStepFrac;
-                end
-                stepSize = stepFrac * Lmax;
-
-                micIdx = mod(it-1, N) + 1;
-
-                dirs = baseDirs(1:min(OPT.probesPerMic,size(baseDirs,1)),:);
-                v = S.M(micIdx,:);
-                nv = norm(v);
-                radial = [1 0 0];
-                if nv > 1e-9, radial = v / nv; end
-                dirs = [dirs; radial; -radial]; %#ok<AGROW>
-
-                bestLocalJ = -inf;
-                bestLocalM = [];
-                bestLocalStats = [];
-                bestLocalDiag = [];
-
-                for k = 1:size(dirs,1)
-                    Mtry = S.M;
-                    Mtry(micIdx,:) = Mtry(micIdx,:) + stepSize * dirs(k,:);
-                    Mtry = Mtry - mean(Mtry,1);
-
-                    r = vecnorm(Mtry,2,2);
-                    if r(micIdx) > Lmax
-                        Mtry(micIdx,:) = Mtry(micIdx,:) * (Lmax/r(micIdx)) * 0.999;
-                        Mtry = Mtry - mean(Mtry,1);
-                    end
-
-                    if ~isValidGeometry(Mtry, Lmax, minD)
-                        continue;
-                    end
-
-                    paramTry = paramTemplate;
-                    paramTry.mic_positions = Mtry;
-                    locTry = BatCallLocaliser(paramTry);
-
-                    [stTry, dgTry] = evaluateFoA_full(locTry, gridPts, P.threshold_cm, ...
-                        P.minDistToAnyMic, P.epsDist, P.failPenalty_cm, P.c);
-
-                    Jtry = scoreJ(stTry, P.lambdaMean, P.failPenalty_cm);
-
-                    if Jtry > bestLocalJ
-                        bestLocalJ = Jtry;
-                        bestLocalM = Mtry;
-                        bestLocalStats = stTry;
-                        bestLocalDiag = dgTry;
-                    end
-                end
-
-                accepted = false;
-                note = sprintf('rejected (stall=%d)', stall+1);
-
-                if ~isempty(bestLocalM) && (bestLocalJ > bestJ + OPT.improveEpsJ)
-                    S.M = bestLocalM;
-                    bestJ = bestLocalJ;
-                    bestStats = bestLocalStats;
-                    bestDiag = bestLocalDiag;
-                    stall = 0;
-                    accepted = true;
-                    note = "accepted (improved J)";
-                    acceptUpdate(bestStats, bestDiag, gridPts);
-                    updateStatus(sprintf('Iter %d/%d: pass=%.1f%% J=%.3f', it, OPT.maxIters, 100*bestStats.passRate, bestJ));
-                else
-                    stall = stall + 1;
-                end
-
-                bestLocal = struct('J',bestLocalJ,'M',bestLocalM,'stats',bestLocalStats,'diag',bestLocalDiag);
-                logIter(it, S.M, micIdx, stepSize, dirs, P, OPT, P.quadrants, gridPts, bestStats, bestDiag, bestJ, bestLocal, accepted, note);
-
-                if bestStats.passRate >= OPT.targetPass
-                    break;
-                end
-
-                if stall >= OPT.stallLimit
-                    Mshake = shakeGeometry(S.M, OPT.shakeFrac*Lmax, Lmax, minD);
-
-                    if ~isValidGeometry(Mshake, Lmax, minD)
-                        Mshake = randomArrayNonCoplanar(N, Lmax, minD);
-                        Mshake = Mshake - mean(Mshake,1);
-                    end
-
-                    paramShake = paramTemplate;
-                    paramShake.mic_positions = Mshake;
-                    locShake = BatCallLocaliser(paramShake);
-
-                    [stShake, dgShake] = evaluateFoA_full(locShake, gridPts, P.threshold_cm, ...
-                        P.minDistToAnyMic, P.epsDist, P.failPenalty_cm, P.c);
-
-                    Jshake = scoreJ(stShake, P.lambdaMean, P.failPenalty_cm);
-
-                    S.M = Mshake;
-                    bestStats = stShake;
-                    bestDiag  = dgShake;
-                    bestJ     = Jshake;
-                    stall = 0;
-
-                    acceptUpdate(bestStats, bestDiag, gridPts);
-                    logIter(it+0.5, S.M, NaN, NaN, [], P, OPT, P.quadrants, gridPts, bestStats, bestDiag, bestJ, [], true, "shake/reset");
-                    updateStatus(sprintf('Shake/reset: pass=%.1f%% J=%.3f', 100*bestStats.passRate, bestJ));
-                end
-
-                drawnow limitrate;
+            if size(S.gridPts,1) > 3000
+                txt = [txt '. Large grid - consider a coarser spacing for optimisation.'];
             end
-
-            if S.stopFlag
-                updateStatus('Optimiser stopped');
-            else
-                updateStatus(sprintf('Optimiser done: %.1f%% pass', 100*S.lastStats.passRate));
-            end
-
-            % Finalise history
-            S.H.meta.timeEnd = datestr(now);
-            S.H.meta.final = struct('M',S.M,'stats',S.lastStats,'diag',S.diag,'J',scoreJ(S.lastStats,P.lambdaMean,P.failPenalty_cm));
-
+            lblGrid.Text = txt;
         catch ME
-            uialert(fig, ME.message, 'Optimiser Error');
-            updateStatus('Optimiser failed');
-        end
-        % Optimiser produced a valid history -> enable reporting/export
-        if ~isempty(S.H) && isfield(S.H,'iter') && numel(S.H.iter) >= 1
-            btnReport.Enable = 'on';
-            btnExportRun.Enable = 'on';
-        end
-
-        btnStop.Enable = 'off';
-        btnOpt.Enable  = 'on';
-        btnRun.Enable  = 'on';
-        btnRand.Enable = 'on';
-        btnLoad.Enable = 'on';
-    end
-
-    function acceptUpdate(stats, diag, gridPts)
-        updateSliderLimits();
-        syncMicToControls();
-
-        S.gridPts   = gridPts;
-        S.lastStats = stats;
-        S.diag      = diag;
-
-        updateStatsTable();
-        refreshPlot(false);
-    end
-
-    function updateSliderLimits()
-        Lmax = edLmax.Value;
-
-        slX.Limits = [-Lmax Lmax];
-        slY.Limits = [-Lmax Lmax];
-        slZ.Limits = [-Lmax Lmax];
-
-        updateSliderTicks();   % keep ticks consistent with new limits
-    end
-
-    function onLmaxChanged()
-        % When array radius changes we must immediately update slider limits
-        % and ticks and ensure current slider values lie within the new limits.
-        markDirty("Array/Field changed");
-        try
-            updateSliderLimits();
-            updateSliderTicks();
-            drawnow;
-            % Clamp slider values to new limits
-            try
-                slX.Value = min(max(slX.Value, slX.Limits(1)), slX.Limits(2));
-            catch
-            end
-            try
-                slY.Value = min(max(slY.Value, slY.Limits(1)), slY.Limits(2));
-            catch
-            end
-            try
-                slZ.Value = min(max(slZ.Value, slZ.Limits(1)), slZ.Limits(2));
-            catch
-            end
-        catch
-            % ignore any compatibility issues
+            S.gridPts = []; S.gridInfo = [];
+            lblGrid.Text = ['Grid error: ' ME.message];
         end
     end
 
-    function updateSliderTicks()
-        Lmax = edLmax.Value;
+    function [vals, lab, kind] = metricValues(st, key)
+        kind = 'err';
+        switch key
+            case 'Score error (m)',        vals = st.score_m;  lab = 'Score error (m)';
+            case 'Horizontal error (m)',   vals = st.errH_m;   lab = 'Horizontal error (m)';
+            case '3-D error (m)',          vals = st.err3_m;   lab = '3-D error (m)';
+            case 'Depth error (m)',        vals = st.errZ_m;   lab = 'Depth error (m)';
+            case 'Bearing error (deg)',    vals = st.brg_deg;  lab = 'Bearing error (deg)'; kind = 'deg';
+            case 'Min. SNR (dB)',          vals = st.minSNR;   lab = 'Min. received SNR (dB)'; kind = 'snr';
+            case '# hydrophones detecting', vals = st.nDet;    lab = '# hydrophones detecting'; kind = 'count';
+            otherwise,                     vals = st.score_m;  lab = 'Score error (m)';
+        end
+    end
 
-        % Pick a nice mid tick; handle degenerate Lmax==0 case
-        if ~isfinite(Lmax) || Lmax <= 0
-            ticks = 0;
+    function refreshFieldPlot()
+        ax = axF;
+        cla(ax); colorbar(ax, 'off'); legend(ax, 'off');
+        resetAxesModes(ax);
+        hold(ax, 'on'); grid(ax, 'on');
+        P = readParamsSafe();
+        env = currentEnvSafe(P);
+        is3 = strcmp(CTRL.viewMode.Value, '3-D');
+        dispKey = CTRL.dispMetric.Value;
+
+        % bathymetry
+        if CTRL.showBathy.Value && ~isempty(env.bathy)
+            [xd, yd, Dd] = decimateForPlot(env.bathy, 160);
+            if is3
+                surf(ax, xd/1e3, yd/1e3, -Dd, 'FaceColor', [0.82 0.76 0.64], 'EdgeColor', 'none', 'FaceAlpha', 0.6);
+            else
+                if numel(unique(round(Dd(:)))) > 1
+                    [cc, hc] = contour(ax, xd/1e3, yd/1e3, Dd, 10, 'LineColor', [0.72 0.72 0.76]);
+                    try, clabel(cc, hc, 'Color', [0.55 0.55 0.6], 'FontSize', 7, 'LabelSpacing', 400); catch, end
+                end
+                try, contour(ax, xd/1e3, yd/1e3, Dd, [0 0], 'LineColor', [0.3 0.25 0.2], 'LineWidth', 1.5); catch, end
+            end
+        elseif is3 && CTRL.showBathy.Value
+            Rv = (CTRL.R.Value + 1000)/1e3;
+            [Xf, Yf] = meshgrid(CTRL.fcx.Value/1e3 + [-Rv Rv], CTRL.fcy.Value/1e3 + [-Rv Rv]);
+            surf(ax, Xf, Yf, -env.flatDepth*ones(2), 'FaceColor', [0.82 0.76 0.64], 'EdgeColor', 'none', 'FaceAlpha', 0.5);
+        end
+
+        if ~is3, drawFieldOutline(ax, P, [0.35 0.35 0.35]); end
+
+        % sources
+        layerMask = [];
+        if ~isempty(S.gridPts) && ~isempty(S.gridInfo)
+            layerMask = true(size(S.gridPts,1), 1);
+            if ~strcmp(CTRL.dispLayer.Value, 'All depths')
+                dsel = str2double(strtok(CTRL.dispLayer.Value));
+                k = find(abs(S.gridInfo.depths - dsel) < 1e-9, 1);
+                if ~isempty(k), layerMask = S.gridInfo.depthIdx == k; end
+            end
+        end
+
+        cbLabel = '';
+        if startsWith(dispKey, 'Sweep')
+            plotSweep(ax, dispKey, is3);
+            cbLabel = 'sweep';
+        elseif ~isempty(S.stats) && ~isempty(S.gridPts) && numel(S.stats.flag) == size(S.gridPts,1)
+            st = S.stats;
+            G = S.gridPts;
+            used = st.usedMask & layerMask;
+            failed = layerMask & (st.flag >= 2);
+            if strcmp(dispKey, 'Pass / fail')
+                pm = used & st.passMask; fm = used & ~st.passMask;
+                scatterPts(ax, G(pm,:), 30, [0.15 0.7 0.3], is3);
+                scatterPts(ax, G(fm,:), 30, [0.85 0.2 0.15], is3);
+            else
+                [vals, lab, kind] = metricValues(st, dispKey);
+                show = used & isfinite(vals);
+                if strcmp(kind, 'err') && ~strcmp(dispKey, 'Score error (m)'), show = show & st.flag == 1; end
+                if any(show)
+                    v = vals(show);
+                    if CTRL.cmax.Value > 0
+                        cl = [0 CTRL.cmax.Value];
+                    else
+                        switch kind
+                            case 'err',   cl = [0 2*P.threshold_m];
+                            case 'deg',   cl = [0 max(HydrophoneGeometry.prctileLocal(v, 95), 1e-3)];
+                            case 'snr',   cl = [min(v) max(max(v), min(v)+1)];
+                            otherwise,    cl = [0 max(max(v), 1)];
+                        end
+                    end
+                    if strcmp(kind, 'snr') || strcmp(kind, 'count'), vv = v; else, vv = min(v, cl(2)); end
+                    if is3
+                        scatter3(ax, G(show,1)/1e3, G(show,2)/1e3, G(show,3), 30, vv, 'filled', 'MarkerFaceAlpha', 0.85);
+                    else
+                        scatter(ax, G(show,1)/1e3, G(show,2)/1e3, 34, vv, 'filled', 'MarkerFaceAlpha', 0.85);
+                    end
+                    colormap(ax, turbo);
+                    caxis(ax, cl);
+                    cbLabel = lab;
+                end
+            end
+            if any(failed) && ~strcmp(dispKey, '# hydrophones detecting') && ~strcmp(dispKey, 'Min. SNR (dB)')
+                scatterPts(ax, G(failed,:), 22, [0.55 0.55 0.55], is3, 'x');
+            end
+        elseif ~isempty(S.gridPts)
+            G = S.gridPts(layerMask,:);
+            scatterPts(ax, G, 10, [0.55 0.6 0.7], is3);
+        end
+        if ~isempty(cbLabel) && ~strcmp(cbLabel, 'sweep')
+            cb = colorbar(ax); cb.Label.String = cbLabel;
+        end
+
+        % hydrophones
+        if ~isempty(S.M)
+            Hn = HydrophoneGeometry.toAbsolute(S.M, placement(P), env);
+            if is3
+                scatter3(ax, Hn(:,1)/1e3, Hn(:,2)/1e3, Hn(:,3), 70, 'k', 'filled', 'Marker', 'v');
+            else
+                scatter(ax, Hn(:,1)/1e3, Hn(:,2)/1e3, 60, 'k', 'filled', 'Marker', 'v');
+            end
+            if CTRL.showLabels.Value && size(Hn,1) <= 24
+                for q = 1:size(Hn,1)
+                    if is3
+                        text(ax, Hn(q,1)/1e3, Hn(q,2)/1e3, Hn(q,3), sprintf(' H%d', q), 'FontSize', 8, 'FontWeight', 'bold');
+                    else
+                        text(ax, Hn(q,1)/1e3, Hn(q,2)/1e3, sprintf(' H%d', q), 'FontSize', 8, 'FontWeight', 'bold');
+                    end
+                end
+            end
+        end
+
+        xlabel(ax, 'East (km)'); ylabel(ax, 'North (km)');
+        if is3
+            zlabel(ax, 'Elevation (m)');
+            view(ax, -35, 28);
+            daspect(ax, [1 1 1000/max(CTRL.VE.Value, 0.1)]);
         else
-            ticks = [-Lmax 0 Lmax];
-            ticks = unique(ticks);
+            view(ax, 2);
+            axis(ax, 'equal');
         end
+        title(ax, fieldTitle());
+        hold(ax, 'off');
+        drawnow limitrate;
+    end
 
-        % Build labels (try string array first, then cell array fallback)
-        try
-            labsStr = compose('%.2f', ticks); % string array
-        catch
-            labsStr = [];
-        end
-        try
-            labsCell = arrayfun(@(x) sprintf('%.2f', x), ticks, 'UniformOutput', false);
-        catch
-            labsCell = cellstr(num2str(ticks(:),'%.2f'))';
-        end
-
-        % Helper to assign ticks+labels robustly
-        assignTicks = @(sld) tryAssign(sld, ticks, labsStr, labsCell);
-
-        % Clear ticks/labels for the mic sliders - the lables were taking
-        % space, the edit boxes update value, so not needed.
-        try
-            slX.MajorTicks = [];
-            slX.MajorTickLabels = {};
-        catch
-        end
-        try
-            slY.MajorTicks = [];
-            slY.MajorTickLabels = {};
-        catch
-        end
-        try
-            slZ.MajorTicks = [];
-            slZ.MajorTickLabels = {};
-        catch
+    function scatterPts(ax, G, sz, col, is3, mk)
+        if isempty(G), return; end
+        if nargin < 6, mk = 'o'; end
+        if is3
+            if strcmp(mk, 'x'), scatter3(ax, G(:,1)/1e3, G(:,2)/1e3, G(:,3), sz, col, 'Marker', 'x');
+            else, scatter3(ax, G(:,1)/1e3, G(:,2)/1e3, G(:,3), sz, col, 'filled');
+            end
+        else
+            if strcmp(mk, 'x'), scatter(ax, G(:,1)/1e3, G(:,2)/1e3, sz, col, 'Marker', 'x');
+            else, scatter(ax, G(:,1)/1e3, G(:,2)/1e3, sz, col, 'filled');
+            end
         end
     end
 
-    function syncMicToControls()
-        if isempty(S.M), return; end
-        i = str2double(ddMic.Value);
-        p = S.M(i,:);
-        slX.Value = p(1); slY.Value = p(2); slZ.Value = p(3);
-        edX.Value = p(1); edY.Value = p(2); edZ.Value = p(3);
-
-        % Keep WAH overlay if it exists
-        hasOverlay = ~isempty(S.gridPts) && isfield(S.lastStats,'err_cm') && any(isfinite(S.lastStats.err_cm));
-        refreshPlot(~hasOverlay);
-    end
-
-    function micMoveFromSlider(axisName, val)
-        if isempty(S.M), return; end
-        i = str2double(ddMic.Value);
-        p = S.M(i,:);
-        switch axisName
-            case 'x', p(1) = val;
-            case 'y', p(2) = val;
-            case 'z', p(3) = val;
-        end
-        [ok,p2] = enforceMicConstraints(i,p);
-        if ok
-            S.M(i,:) = p2;
-            edX.Value = p2(1); edY.Value = p2(2); edZ.Value = p2(3);
-            refreshPlot(true);
+    function t = fieldTitle()
+        if startsWith(CTRL.dispMetric.Value, 'Sweep')
+            if isempty(S.sweep), t = 'No sweep yet - click "Run sweep"'; else, t = 'Array position sweep (each marker = array origin)'; end
+        elseif isempty(S.stats)
+            t = sprintf('Preview: %d synthetic sources (evaluate to colour by accuracy)', size(S.gridPts,1));
+        else
+            t = sprintf('%s  |  pass %.1f%% (threshold %.0f m)', CTRL.dispMetric.Value, 100*S.stats.passRate, S.stats.threshold_m);
         end
     end
 
-    function micMoveFromEdit()
-        if isempty(S.M), return; end
-        i = str2double(ddMic.Value);
-        p = [edX.Value, edY.Value, edZ.Value];
-        [ok,p2] = enforceMicConstraints(i,p);
-        if ok
-            S.M(i,:) = p2;
-            slX.Value = p2(1); slY.Value = p2(2); slZ.Value = p2(3);
-            refreshPlot(true);
+    function plotSweep(ax, key, is3)
+        if isempty(S.sweep), return; end
+        sw = S.sweep;
+        byMedian = strcmp(key, 'Sweep: median error (m)');
+        % best candidate (over yaw) at each distinct position
+        [U, ~, ic] = unique([sw.ox sw.oy], 'rows');
+        v = nan(size(U,1),1); okU = false(size(U,1),1); yU = nan(size(U,1),1);
+        for q = 1:size(U,1)
+            m = find(ic == q & sw.valid);
+            if isempty(m), continue; end
+            if byMedian, [v(q), k] = min(sw.median(m)); else, [v(q), k] = max(100*sw.pass(m)); end
+            yU(q) = sw.yaw(m(k)); okU(q) = true;
         end
+        if byMedian, lab = 'Median error (m) with array here (best yaw)';
+        else, lab = 'Pass rate (%) with array here (best yaw)';
+        end
+        if is3
+            scatter3(ax, U(okU,1)/1e3, U(okU,2)/1e3, zeros(sum(okU),1), 120, v(okU), 'filled', 'Marker', 's');
+        else
+            scatter(ax, U(okU,1)/1e3, U(okU,2)/1e3, 140, v(okU), 'filled', 'Marker', 's', 'MarkerEdgeColor', [0.3 0.3 0.3]);
+            if any(~okU), plot(ax, U(~okU,1)/1e3, U(~okU,2)/1e3, 'x', 'Color', [0.5 0.5 0.5]); end
+            if numel(unique(sw.yaw)) > 1 && sum(okU) <= 60
+                for q = find(okU)'
+                    text(ax, U(q,1)/1e3, U(q,2)/1e3, sprintf('  %g deg', yU(q)), 'FontSize', 7);
+                end
+            end
+            if isfinite(sw.best)
+                plot(ax, sw.ox(sw.best)/1e3, sw.oy(sw.best)/1e3, 'p', 'MarkerSize', 18, 'MarkerFaceColor', 'y', 'MarkerEdgeColor', 'k');
+            end
+        end
+        colormap(ax, turbo);
+        if any(okU) && max(v(okU)) > min(v(okU)), caxis(ax, [min(v(okU)) max(v(okU))]); end
+        cb = colorbar(ax); cb.Label.String = lab;
     end
 
-    function [ok,pOut] = enforceMicConstraints(i,pIn)
-        ok = true;
-        pOut = pIn;
-
-        Lmax = edLmax.Value;
-        minD = edMinPair.Value;
-
-        r = norm(pOut);
-        if r > Lmax
-            pOut = pOut * (Lmax/r) * 0.999;
+    function drawFieldOutline(ax, P, col)
+        a = linspace(0, 2*pi, 361);
+        cx = CTRL.fcx.Value/1e3; cy = CTRL.fcy.Value/1e3;
+        plot(ax, cx + CTRL.R.Value/1e3*sin(a), cy + CTRL.R.Value/1e3*cos(a), '--', 'Color', col);
+        if CTRL.Rin.Value > 0
+            plot(ax, cx + CTRL.Rin.Value/1e3*sin(a), cy + CTRL.Rin.Value/1e3*cos(a), ':', 'Color', col);
         end
+        if abs(CTRL.azTo.Value - CTRL.azFrom.Value) < 360
+            for az = [CTRL.azFrom.Value CTRL.azTo.Value]
+                plot(ax, cx + [CTRL.Rin.Value CTRL.R.Value]/1e3*sind(az), cy + [CTRL.Rin.Value CTRL.R.Value]/1e3*cosd(az), '-', 'Color', col);
+            end
+        end
+        plot(ax, P.ox/1e3, P.oy/1e3, 'p', 'MarkerSize', 10, 'MarkerFaceColor', 'r', 'MarkerEdgeColor', 'k');
+    end
 
-        Mtry = S.M;
-        Mtry(i,:) = pOut;
-        Mtry = Mtry - mean(Mtry,1);
-
-        if ~isValidGeometry(Mtry, Lmax, minD)
-            ok = false;
+    function updateStatsLabel()
+        if isempty(S.stats)
+            lblStats.Text = 'No results yet.';
             return;
         end
-
-        S.M = Mtry;
-        pOut = S.M(i,:);
+        st = S.stats; dg = S.diag;
+        if isempty(S.M), geo = '---';
+        else
+            Dm = HydrophoneGeometry.pairDist(S.M); Dn = Dm; Dn(1:size(Dm,1)+1:end) = inf;
+            geo = sprintf('%d hydrophones, min spacing %.0f m, aperture %.0f m', size(S.M,1), min(Dn(:)), max(Dm(:)));
+        end
+        lblStats.Text = sprintf(['Pass %.1f%%  (score <= %.0f m, %s)\n' ...
+            'Median %.1f m  |  Mean %.1f m  |  P95 %.1f m  |  Max %.1f m\n' ...
+            'Detected %.1f%%  |  undetected %d, TDOA fail %d, solve fail %d  |  sources used %d / %d\n%s'], ...
+            100*st.passRate, st.threshold_m, st.scoreMetric, st.medianErr, st.meanErr, st.p95Err, st.maxErr, ...
+            100*st.detRate, dg.undetected, dg.tdoaFail, dg.solveFail, dg.gridUsed, dg.nP, geo);
     end
 
-    function recenterArray()
-        if isempty(S.M), return; end
-        S.M = S.M - mean(S.M,1);
-        syncMicToControls();
-        updateStatus('Array re-centred');
+    function refreshAll()
+        updateDepthLayers();
+        refreshArrayTab();
+        refreshEnvPlots();
+        refreshGridPreview();
+        refreshFieldPlot();
+        updateStatsLabel();
+    end
+
+    function clearResults()
+        S.stats = []; S.diag = struct();
+        S.H = []; S.runInfo = [];
+        S.sweep = [];
+        if exist('btnReport', 'var') && isvalid(btnReport), btnReport.Enable = 'off'; end
+        if exist('btnExportRun', 'var') && isvalid(btnExportRun), btnExportRun.Enable = 'off'; end
+        if exist('lblStats', 'var') && isvalid(lblStats), updateStatsLabel(); end
     end
 
     function updateStatus(msg)
         lblStatus.Text = msg;
     end
 
-    function refreshPlot(geometryOnly)
-        cla(ax);
-        hold(ax,'on'); grid(ax,'on'); axis(ax,'equal'); view(ax,3);
+%% ====================================================================
+%  Evaluation, optimisation, sweep
+%% ====================================================================
+    function setBusy(b)
+        S.busy = b;
+        onoff = {'on','off'};
+        st = onoff{1 + b};
+        btnRun.Enable = st; btnOpt.Enable = st;
+        if b, btnStop.Enable = 'on'; else, btnStop.Enable = 'off'; end
+        if b, S.stopFlag = false; end
+        drawnow;
+    end
 
-        Lmax = edLmax.Value;
-        R = edR.Value;
+    function doStop()
+        S.stopFlag = true;
+        updateStatus('Stopping...');
+    end
 
-        [sx,sy,sz] = sphere(30);
-        surf(ax, Lmax*sx, Lmax*sy, Lmax*sz, 'FaceAlpha',0.05,'EdgeAlpha',0.12);
-        surf(ax, R*sx,    R*sy,    R*sz,    'FaceAlpha',0.03,'EdgeAlpha',0.08);
-
-        if ~isempty(S.M)
-            cmap = lines(size(S.M,1));
-            for ii = 1:size(S.M,1)
-                scatter3(ax, S.M(ii,1),S.M(ii,2),S.M(ii,3), 120, cmap(ii,:), 'filled',...
-                    'MarkerEdgeColor','k','LineWidth',1.5);
-                text(ax, S.M(ii,1),S.M(ii,2),S.M(ii,3), sprintf('  M%d',ii), ...
-                    'FontWeight','bold','FontSize',10,'Color',cmap(ii,:));
-            end
+    function ok = confirmGridSize(n, what)
+        ok = true;
+        if n > 4000
+            sel = uiconfirm(fig, sprintf('%s will simulate %d sources per evaluation. This may take a long time. Continue?', what, n), ...
+                'Large grid', 'Options', {'Continue','Cancel'}, 'DefaultOption', 2, 'CancelOption', 2);
+            ok = strcmp(sel, 'Continue');
         end
-        plot3(ax,0,0,0,'pentagram','MarkerSize',12,'LineWidth',2,...
-            'MarkerFaceColor','r','MarkerEdgeColor','k');
+    end
 
-        if ~geometryOnly && ~isempty(S.gridPts) && isfield(S.lastStats,'err_cm')
-            if S.metric == "pos"
-                vals = S.lastStats.err_cm;
-                ttl = 'Position Error (cm)';
+    function doRunWAH()
+        if S.busy, return; end
+        if isempty(S.M), uialert(fig, 'No hydrophone geometry (Array Design tab).', 'Missing geometry'); return; end
+        try
+            P = readParams();
+            ctx = buildContext(P);
+            if ~confirmGridSize(size(ctx.grid,1), 'The evaluation'), return; end
+            setBusy(true);
+            S.progressPrefix = 'Evaluating:';
+            t0 = tic;
+            [st, dg] = evaluateGeometry(S.M, P.ox, P.oy, ctx);
+            S.gridPts = ctx.grid; S.gridInfo = ctx.gridInfo;
+            S.stats = st; S.diag = dg;
+            initHistory(P, ctx);
+            logIter(0, S.M, NaN, NaN, [], st, dg, scoreJ(st, P), true, 'WAH baseline');
+            updateStatsLabel();
+            if startsWith(CTRL.dispMetric.Value, 'Sweep'), CTRL.dispMetric.Value = 'Score error (m)'; end
+            refreshFieldPlot();
+            if dg.aborted
+                updateStatus('Evaluation stopped - partial results shown.');
             else
-                vals = S.lastStats.ang_deg;
-                ttl = 'Angular Error (deg)';
+                updateStatus(sprintf('Evaluation done in %.1f s: %.1f%% pass, median %.1f m.', toc(t0), 100*st.passRate, st.medianErr));
+            end
+            btnReport.Enable = 'off'; btnExportRun.Enable = 'on';
+        catch ME
+            uialert(fig, ME.message, 'Evaluation error');
+            updateStatus('Evaluation failed');
+        end
+        setBusy(false);
+    end
+
+    function dirs = probeDirs(moveZ)
+        ang = [0 180 90 270 45 225 135 315 22.5 202.5 112.5 292.5 67.5 247.5 157.5 337.5];
+        dirs = [cosd(ang)' sind(ang)' zeros(numel(ang),1)];
+        if moveZ
+            dirs = [dirs(1:4,:); 0 0 1; 0 0 -1; dirs(5:end,:)];
+        end
+    end
+
+    function doOptimiser()
+        if S.busy, return; end
+        if isempty(S.M), uialert(fig, 'No hydrophone geometry (Array Design tab).', 'Missing geometry'); return; end
+        try
+            P = readParams();
+            ctx = buildContext(P);
+            if ~confirmGridSize(size(ctx.grid,1), 'Each optimiser probe'), return; end
+            [ok, msg] = HydrophoneGeometry.isValid(S.M, P.Lmax, P.minPair);
+            if ~ok
+                uialert(fig, sprintf('The starting geometry violates the constraints:\n%s\nAdjust Lmax / min spacing or the array.', msg), 'Invalid start');
+                return;
+            end
+        catch ME
+            uialert(fig, ME.message, 'Optimiser error');
+            return;
+        end
+
+        setBusy(true);
+        btnReport.Enable = 'off'; btnExportRun.Enable = 'off';
+        S.H = []; S.runInfo = [];
+        try
+            S.progressPrefix = 'Baseline:';
+            [bestStats, bestDiag] = evaluateGeometry(S.M, P.ox, P.oy, ctx);
+            bestJ = scoreJ(bestStats, P);
+            initHistory(P, ctx);
+            logIter(0, S.M, NaN, NaN, [], bestStats, bestDiag, bestJ, true, 'baseline');
+            acceptUpdate(bestStats, bestDiag, ctx);
+
+            dirsAll = probeDirs(P.moveZ);
+            N = size(S.M, 1);
+            stall = 0;
+            for it = 1:P.maxIters
+                if S.stopFlag, break; end
+                if P.maxIters > 1
+                    stepFrac = max(P.minStep, P.initStep*(1 - (it-1)/(P.maxIters-1)));
+                else
+                    stepFrac = P.initStep;
+                end
+                stepSize = stepFrac * P.Lmax;
+                hIdx = mod(it-1, N) + 1;
+                dirs = dirsAll(1:min(P.probes, size(dirsAll,1)), :);
+                cvec = mean(S.M(:,1:2), 1);
+                rv = [S.M(hIdx,1:2) - cvec 0];
+                if norm(rv) > 1e-9, rv = rv/norm(rv); else, rv = [1 0 0]; end
+                dirs = [dirs; rv; -rv]; %#ok<AGROW>
+
+                bestLocalJ = -inf; bestLocalM = []; bestLocalStats = []; bestLocalDiag = [];
+                for k = 1:size(dirs,1)
+                    if S.stopFlag, break; end
+                    Mtry = S.M;
+                    Mtry(hIdx,:) = Mtry(hIdx,:) + stepSize*dirs(k,:);
+                    Mtry = HydrophoneGeometry.recentreXY(Mtry);
+                    Mtry = HydrophoneGeometry.clampXY(Mtry, P.Lmax);
+                    if strcmp(P.placeMode, 'seafloor'), Mtry(:,3) = max(Mtry(:,3), 0); end
+                    if ~HydrophoneGeometry.isValid(Mtry, P.Lmax, P.minPair), continue; end
+                    S.progressPrefix = sprintf('Iter %d/%d, H%d probe %d/%d:', it, P.maxIters, hIdx, k, size(dirs,1));
+                    try
+                        [stT, dgT] = evaluateGeometry(Mtry, P.ox, P.oy, ctx);
+                    catch
+                        continue;   % e.g. hydrophone moved onto land
+                    end
+                    if dgT.aborted, break; end
+                    Jt = scoreJ(stT, P);
+                    if Jt > bestLocalJ
+                        bestLocalJ = Jt; bestLocalM = Mtry; bestLocalStats = stT; bestLocalDiag = dgT;
+                    end
+                end
+                if S.stopFlag, break; end
+
+                accepted = false;
+                if ~isempty(bestLocalM) && bestLocalJ > bestJ + P.epsJ
+                    S.M = bestLocalM; bestJ = bestLocalJ; bestStats = bestLocalStats; bestDiag = bestLocalDiag;
+                    stall = 0; accepted = true; note = 'accepted (improved J)';
+                    acceptUpdate(bestStats, bestDiag, ctx);
+                    updateStatus(sprintf('Iter %d/%d: pass %.1f%%, median %.1f m, J = %.3f', it, P.maxIters, ...
+                        100*bestStats.passRate, bestStats.medianErr, bestJ));
+                else
+                    stall = stall + 1;
+                    note = sprintf('rejected (stall=%d)', stall);
+                end
+                logIter(it, S.M, hIdx, stepSize, dirs, bestStats, bestDiag, bestJ, accepted, note);
+
+                if bestStats.passRate >= P.targetPass, break; end
+
+                if stall >= P.stall
+                    Msh = HydrophoneGeometry.shake(S.M, P.shake*P.Lmax, P.Lmax, P.minPair, P.moveZ);
+                    if strcmp(P.placeMode, 'seafloor'), Msh(:,3) = max(Msh(:,3), 0); end
+                    S.progressPrefix = 'Shake/reset:';
+                    try
+                        [stS, dgS] = evaluateGeometry(Msh, P.ox, P.oy, ctx);
+                        S.M = Msh; bestStats = stS; bestDiag = dgS; bestJ = scoreJ(stS, P);
+                        acceptUpdate(bestStats, bestDiag, ctx);
+                        logIter(it + 0.5, S.M, NaN, NaN, [], bestStats, bestDiag, bestJ, true, 'shake/reset');
+                    catch
+                    end
+                    stall = 0;
+                end
+                drawnow limitrate;
             end
 
-            scatter3(ax, S.gridPts(:,1),S.gridPts(:,2),S.gridPts(:,3), ...
-                28, vals, 'filled','MarkerFaceAlpha',0.65);
-
-            colormap(ax, turbo);
-            % --- colourbar ---
-            cb = findall(ax, 'Type', 'ColorBar');    % look on the axes (not the figure)
-            if isempty(cb) || ~isvalid(cb)
-                cb = colorbar(ax);
+            S.H.meta.timeEnd = datestr(now);
+            S.H.meta.final = struct('M', S.M, 'stats', S.stats, 'diag', S.diag, 'J', scoreJ(S.stats, P));
+            if S.stopFlag
+                updateStatus(sprintf('Optimiser stopped: %.1f%% pass, median %.1f m.', 100*S.stats.passRate, S.stats.medianErr));
             else
-                cb = cb(1);                         % in case there are multiples
+                updateStatus(sprintf('Optimiser done: %.1f%% pass, median %.1f m.', 100*S.stats.passRate, S.stats.medianErr));
             end
-
-            cb.Location      = 'eastoutside';
-            cb.TickDirection = 'in';
-            cb.Box           = 'off';
-            cb.FontSize      = 10;
-
-            % Make it thin
-            if isprop(cb,'Thickness')               % newer MATLAB releases
-                cb.Thickness = 6;                   % try 6–12
-            else                                    % older: shrink Position width
-                drawnow;                            % ensure cb.Position is initialised
-                p = cb.Position;                    % [x y w h]
-                p(3) = p(3) * 0.35;                 % thinner
-                cb.Position = p;
-            end
-
-            cb.Label.String  = ttl;
-            cb.Label.FontWeight = 'normal';
+        catch ME
+            uialert(fig, ME.message, 'Optimiser error');
+            updateStatus('Optimiser failed');
         end
-
-        xlabel(ax,'X (m)','FontWeight','bold','FontSize',10);
-        ylabel(ax,'Y (m)','FontWeight','bold','FontSize',10);
-        zlabel(ax,'Z (m)','FontWeight','bold','FontSize',10);
-
-        drawnow limitrate;
+        if ~isempty(S.H) && isfield(S.H, 'iter') && numel(S.H.iter) >= 1
+            btnReport.Enable = 'on'; btnExportRun.Enable = 'on';
+        end
+        setBusy(false);
     end
 
-    function updateStatsTable()
-        % Geometry string
-        if isempty(S.M)
-            geomStr = '---';
-        else
-            Dmat = squareform(pdist(S.M));
-            Dmat(Dmat==0) = inf;
-            minPair = min(Dmat(:));
-            r = vecnorm(S.M,2,2);
-            geomStr = sprintf('%.3fm / %.3fm', minPair, max(r));
-        end
-
-        % Stats strings
-        if isempty(S.lastStats) || ~isfield(S.lastStats,'meanErr') || isnan(S.lastStats.meanErr)
-            passStr = '---'; meanStr = '---'; p95Str = '---'; maxStr = '---';
-            usedStr = '---';
-        else
-            passStr = sprintf('%.1f%%', 100*S.lastStats.passRate);
-            meanStr = sprintf('%.2f cm', S.lastStats.meanErr);
-            p95Str  = sprintf('%.2f cm', S.lastStats.p95Err);
-            maxStr  = sprintf('%.2f cm', S.lastStats.maxErr);
-            if isfield(S.diag,'gridUsed')
-                usedStr = sprintf('%d', S.diag.gridUsed);
-            else
-                usedStr = '---';
-            end
-        end
-
-        if isempty(fieldnames(S.diag))
-            failStr = '---';
-        else
-            failStr = sprintf('%d/%d/%d', S.diag.simFail, S.diag.tdoaFail, S.diag.solveFail);
-        end
-
-        lblStats.Text = sprintf([ ...
-            'Pass:  %s  |  ' ...
-            'Mean:  %s  |  ' ...
-            'P95:  %s  |  ' ...
-            'Max:  %s\n\n' ...
-            'Fails:  %s (sim/tdoa/solve)  |  ' ...
-            'Geometry:  %s (minPair/maxArm)  |  ' ...
-            'Grid Points:  %s' ], ...
-            passStr, meanStr, p95Str, maxStr, failStr, geomStr, usedStr);
+    function acceptUpdate(st, dg, ctx)
+        S.stats = st; S.diag = dg;
+        S.gridPts = ctx.grid; S.gridInfo = ctx.gridInfo;
+        refreshArrayTab();
+        updateStatsLabel();
+        if startsWith(CTRL.dispMetric.Value, 'Sweep'), CTRL.dispMetric.Value = 'Score error (m)'; end
+        refreshFieldPlot();
     end
 
-    function resetResults()
-        S.gridPts = [];
-        S.lastStats = struct('passRate',0,'meanErr',NaN,'p95Err',NaN,'maxErr',NaN,'threshold_cm',NaN);
-        S.diag = struct();
-        S.H = [];
-        S.runInfo = [];
-    end
-
-    function P = readParams()
-        P = struct();
-
-        % ---- Array & Field ----
-        P.Lmax = edLmax.Value;
-        P.N = round(edN.Value);
-        P.minPairDist = edMinPair.Value;
-        P.R = edR.Value;
-        P.Rin = edRin.Value;
-        P.step = edStep.Value;
-
-        P.best_cm = edBest.Value;
-        P.tol_cm = edTol.Value;
-        P.threshold_cm = P.best_cm + P.tol_cm;
-
-        P.lambdaMean = edLambda.Value;
-        P.failPenalty_cm = edFailPen.Value;
-
-        P.minDistToAnyMic = edMinDistAny.Value;
-        P.epsDist = edEps.Value;
-        P.c = 343;
-
-        % ---- Call synthesis ----
-        P.fs = edFs.Value;
-        P.d = edDur.Value/1000;      % ms -> s
-        P.f0 = edF0.Value;
-        P.f1 = edF1.Value;
-        if P.f0 > P.f1
-            tmp = P.f0; P.f0 = P.f1; P.f1 = tmp;
-        end
-        P.snr_db = edSNR.Value;
-        P.tail = edTail.Value;
-        P.callType = ddCallType.Value;
-
-        % ---- Quadrants ----
-        P.quadrants = S.quadrants;
-
-        % ---- Validations ----
-        if P.Rin >= P.R
-            error('FoA inner radius must be smaller than FoA outer radius.');
-        end
-        if P.step <= 0
-            error('Grid spacing must be > 0.');
-        end
-        if P.d <= 0
-            error('Call duration must be > 0.');
-        end
-        if P.fs <= 0
-            error('Sample rate must be > 0.');
-        end
-        if ~any(structfun(@(x)x, P.quadrants))
-            error('No octants enabled.');
-        end
-    end
-
-    function OPT = readOPT()
-        OPT = struct();
-        OPT.maxIters      = round(edMaxIters.Value);
-        OPT.probesPerMic  = round(edProbes.Value);
-        OPT.initStepFrac  = edInitStep.Value;
-        OPT.minStepFrac   = edMinStep.Value;
-        OPT.stallLimit    = round(edStall.Value);
-        OPT.shakeFrac     = edShake.Value;
-        OPT.improveEpsJ   = edEpsJ.Value;
-        OPT.targetPass    = edTargetPass.Value;
-    end
-
-    function [loc, gridPts] = buildLocaliserAndGrid(P)
-        if isempty(S.M), error('No mic geometry'); end
-
-        gridPts = buildShellGrid(P.R, P.Rin, P.step, P.quadrants);
-        if isempty(gridPts), error('Empty grid — check octant selection'); end
-
-        param = struct();
-        param.fs = P.fs;
-        param.d = P.d;
-        param.f0 = P.f0;
-        param.f1 = P.f1;
-        param.tail = P.tail;
-        param.snr_db = P.snr_db;
-        param.callType = P.callType;
-        param.velocity = [0 0 0];
-        param.mic_positions = S.M;
-
-        loc = BatCallLocaliser(param);
-    end
-
-    function initHistoryIfNeeded(P)
-        if ~isempty(S.H), return; end
-
+    function initHistory(P, ctx)
         S.H = struct();
         S.H.meta = struct();
-        S.H.meta.rngSeed = S.rngSeed;
+        S.H.meta.version = 'WAH-i Ocean 1.0';
+        S.H.meta.rngSeed = P.seed;
         S.H.meta.timeStart = datestr(now);
         S.H.meta.P = P;
-        S.H.meta.OPT = readOPT();
-        S.H.meta.Q = P.quadrants;
-        S.H.meta.start = struct('source',"GUI",'csvPath','', 'M', S.M);
-        S.H.iter = struct('it',{},'M',{},'micIdx',{},'stepSize',{},'dirsTried',{}, ...
-            'P',{},'OPT',{},'Q',{},'gridPts',{},'stats',{},'diag',{},'J',{}, ...
-            'bestLocal',{},'accepted',{},'note',{});
-
-        S.runInfo = struct();
-        S.runInfo.seed = S.rngSeed;
-        S.runInfo.N = size(S.M,1);
-        S.runInfo.startNote = "GUI start";
-        S.runInfo.csvPath = "";
-        S.runInfo.mode = "gui";
-        S.runInfo.configTag = "interactive";
-        S.runInfo.rep = 1;
-        S.runInfo.csvFile = "";
+        S.H.meta.env = ctx.env;
+        S.H.meta.call = S.call;
+        S.H.meta.band = S.band;
+        S.H.meta.gridPts = ctx.grid;
+        S.H.meta.gridInfo = ctx.gridInfo;
+        S.H.meta.start = struct('source', 'GUI', 'M', S.M);
+        S.H.iter = struct('it', {}, 'M', {}, 'hydIdx', {}, 'stepSize', {}, 'dirsTried', {}, ...
+            'stats', {}, 'diag', {}, 'J', {}, 'accepted', {}, 'note', {});
+        S.runInfo = struct('seed', P.seed, 'N', size(S.M,1), 'startNote', 'GUI start', 'mode', 'gui', ...
+            'configTag', 'interactive', 'rep', 1, 'csvFile', '');
     end
 
-    function logIter(it, M, micIdx, stepSize, dirs, P, OPT, Q, gridPts, stats, diag, J, bestLocal, accepted, note)
-        rec = struct();
-        rec.it = it;
-        rec.M = M;
-        rec.micIdx = micIdx;
-        rec.stepSize = stepSize;
-        rec.dirsTried = dirs;
-        rec.P = P;
-        rec.OPT = OPT;
-        rec.Q = Q;
-        rec.gridPts = gridPts;
-        rec.stats = stats;
-        rec.diag = diag;
-        rec.J = J;
-        rec.bestLocal = bestLocal;
-        rec.accepted = accepted;
-        rec.note = char(note);
-        S.H.iter(end+1) = rec; %#ok<AGROW>
+    function logIter(it, M, hIdx, stepSize, dirs, st, dg, J, accepted, note)
+        rec = struct('it', it, 'M', M, 'hydIdx', hIdx, 'stepSize', stepSize, 'dirsTried', dirs, ...
+            'stats', st, 'diag', dg, 'J', J, 'accepted', accepted, 'note', char(note));
+        S.H.iter(end+1) = rec;
     end
 
-    function fn = defaultRunFileName()
-        N = size(S.M,1);
-        ts = datestr(now,'yyyymmdd_HHMMSS');
-        fn = sprintf('iwah_gui_run__%dmics__%s.mat', N, ts);
-    end
-
-    function pos = localiseTDOA_global(tdoa, mic_pos, c)
-        % Solve: ||mi-x|| - ||m1-x|| = c*tdoa_i
-        tdoa = tdoa(:);
-        m1 = mic_pos(1,:);
-        mi = mic_pos(2:end,:);
-
-        fun = @(x) vecnorm(mi - x,2,2) - norm(m1 - x) - c*tdoa;
-
-        x0 = mean(mic_pos,1) + [0.25 0 0];
-        opts = optimoptions('lsqnonlin', ...
-            'Display','off', ...
-            'FunctionTolerance',1e-10, ...
-            'StepTolerance',1e-10, ...
-            'MaxIterations',200);
-
-        pos = lsqnonlin(fun, x0, [], [], opts);
-    end
-
-% helper to set tooltip
-    function setTip(h, tip)
-        if isempty(h), return; end
+    function doSweep()
+        if S.busy, return; end
+        if isempty(S.M), uialert(fig, 'No hydrophone geometry.', 'Missing geometry'); return; end
         try
-            if isvalid(h)
-                h.Tooltip = char(tip);  % char() is safe across string/char inputs
-            end
-        catch
-            % ignore environments where isvalid or Tooltip may error
-        end
-    end
-
-
-    function markDirty(reason)
-        if nargin < 1, reason = "Changes pending"; end
-        S.dirty = true;
-
-        if exist('btnApplyAll','var')
-            try
-                if isvalid(btnApplyAll)
-                    btnApplyAll.Enable = 'on';
-                end
-            catch
-            end
-        end
-
-        % Update status label directly (no dependency on updateStatus)
-        if exist('lblStatus','var')
-            try
-                if isvalid(lblStatus)
-                    lblStatus.Text = sprintf('%s — click Apply Changes', reason);
-                end
-            catch
-            end
-        end
-    end
-
-    function applyAllChanges()
-        % Applies ALL pending edits in one shot:
-        %  - octants -> S.quadrants
-        %  - RNG seed
-        %  - mic count reconcile (trim/extend)
-        %  - refresh geometry-only plot + stats label
-        %  - invalidate evaluation results
-
-        % ---- local "safe UI" helpers (no dependency on updateStatus/fig scope) ----
-        safeStatus = @(msg) setStatusSafe(msg);
-        safeAlert  = @(msg,title) alertSafe(msg,title);
-
-        try
-            % 0) Guard: ensure S exists
-            if ~exist('S','var')
-                safeAlert('Internal state (S) not found. Ensure applyAllChanges is nested inside iwah_gui_full2().', ...
-                    'Apply Changes Error');
-                return;
-            end
-
-            % 1) Pull octant UI -> state
-            S.quadrants.frontTopLeft     = cbFrontTopLeft.Value;
-            S.quadrants.frontTopRight    = cbFrontTopRight.Value;
-            S.quadrants.frontBottomLeft  = cbFrontBottomLeft.Value;
-            S.quadrants.frontBottomRight = cbFrontBottomRight.Value;
-            S.quadrants.backTopLeft      = cbBackTopLeft.Value;
-            S.quadrants.backTopRight     = cbBackTopRight.Value;
-            S.quadrants.backBottomLeft   = cbBackBottomLeft.Value;
-            S.quadrants.backBottomRight  = cbBackBottomRight.Value;
-
-            if ~any(structfun(@(x)x, S.quadrants))
-                safeAlert('At least one octant must be enabled.', 'Invalid octant selection');
-                return;
-            end
-
-            % 2) Apply RNG seed (no separate "apply seed" button needed)
-            S.rngSeed = round(edSeed.Value);
-            rng(S.rngSeed,'twister');
-
-            % 3) Apply mic count changes (trim/extend geometry)
-            Nnew = round(edN.Value);
-            Lmax = edLmax.Value;
-            minD = edMinPair.Value;
-
-            if isempty(S.M)
-                % If no geometry exists yet, initialise one
-                S.M = randomArrayNonCoplanar(Nnew, Lmax, minD);
+            P = readParams();
+            ctx = buildContext(P);
+            if strcmp(CTRL.sweepArea.Value, 'Around current origin')
+                cx = P.ox; cy = P.oy; Rs = CTRL.sweepR.Value;
             else
-                S.M = reconcileMicCount(S.M, Nnew, Lmax, minD);
+                cx = P.fcx; cy = P.fcy; Rs = P.R;
             end
-
-            % Keep centred
-            S.M = S.M - mean(S.M,1);
-
-            % 4) Update mic dropdown + sliders to new limits
-            ddMic.Items = compose('%d', 1:size(S.M,1));
-            if isempty(ddMic.Value) || ~any(strcmp(ddMic.Value, ddMic.Items))
-                ddMic.Value = '1';
+            stepS = CTRL.sweepStep.Value;
+            n = floor(Rs/stepS);
+            [Xo, Yo] = meshgrid((-n:n)*stepS, (-n:n)*stepS);
+            keep = sqrt(Xo.^2 + Yo.^2) <= Rs + 1e-9;
+            oxP = cx + Xo(keep); oyP = cy + Yo(keep);
+            yawList = parseAngles(CTRL.sweepYaw.Value);
+            if isempty(yawList), yawList = P.yaw; end
+            nP = numel(oxP); nY = numel(yawList);
+            ox = repmat(oxP, nY, 1); oy = repmat(oyP, nY, 1);
+            yw = kron(yawList(:), ones(nP, 1));
+            nO = numel(ox);
+            if nO > 400
+                error('%d candidates (%d positions x %d yaws) - increase the sweep spacing or use fewer yaws.', nO, nP, nY);
             end
-
-            updateSliderLimits();
-            syncMicToControls();  % includes geometry refresh
-
-            % 5) Invalidate previous evaluation (grid+stats no longer valid)
-            clearEvaluationResultsOnly();
-
-            % 6) Update stats + geometry plot
-            updateStatsTable();
-            refreshPlot(true); % geometry + shells only (no colours)
-
-            % 7) Clear dirty flag & disable button
-            S.dirty = false;
-            if exist('btnApplyAll','var') && isvalid(btnApplyAll)
-                btnApplyAll.Enable = 'off';
-            end
-
-            nEnabled = sum(structfun(@(x)x, S.quadrants));
-            safeStatus(sprintf('Applied changes. Run WAH to recompute.', ...
-                S.rngSeed, size(S.M,1), nEnabled));
-
+            sel = uiconfirm(fig, sprintf('Evaluate %d candidates (%d positions x %d yaw angles) x %d sources = %d simulations?', ...
+                nO, nP, nY, size(ctx.grid,1), nO*size(ctx.grid,1)), ...
+                'Run sweep', 'Options', {'Run','Cancel'}, 'DefaultOption', 1, 'CancelOption', 2);
+            if ~strcmp(sel, 'Run'), return; end
         catch ME
-            safeAlert(ME.message, 'Apply Changes Error');
-            safeStatus('Apply failed');
+            uialert(fig, ME.message, 'Sweep error');
+            return;
         end
+        setBusy(true);
+        sw = struct('ox', ox, 'oy', oy, 'yaw', yw, 'pass', nan(nO,1), 'median', nan(nO,1), 'mean', nan(nO,1), ...
+            'p95', nan(nO,1), 'det', nan(nO,1), 'valid', false(nO,1), 'best', NaN, 'rank', CTRL.sweepRank.Value);
+        try
+            for q = 1:nO
+                if S.stopFlag, break; end
+                S.progressPrefix = sprintf('Sweep candidate %d/%d (yaw %.0f):', q, nO, yw(q));
+                try
+                    [stq, dgq] = evaluateGeometry(S.M, ox(q), oy(q), ctx, yw(q));
+                    if dgq.aborted, break; end
+                    sw.pass(q) = stq.passRate; sw.median(q) = stq.medianErr; sw.mean(q) = stq.meanErr;
+                    sw.p95(q) = stq.p95Err; sw.det(q) = stq.detRate; sw.valid(q) = true;
+                catch
+                    sw.valid(q) = false;  % on land etc.
+                end
+            end
+            if any(sw.valid)
+                idx = find(sw.valid);
+                if strcmp(CTRL.sweepRank.Value, 'Pass rate')
+                    key = [-sw.pass(idx) sw.median(idx)];
+                else
+                    key = [sw.median(idx) -sw.pass(idx)];
+                end
+                [~, ord] = sortrows(key);
+                sw.best = idx(ord(1));
+                lblSweep.Text = sprintf('Best of %d candidates: origin (%.0f, %.0f) m, yaw %.1f deg - pass %.1f%%, median %.1f m.', ...
+                    sum(sw.valid), sw.ox(sw.best), sw.oy(sw.best), sw.yaw(sw.best), 100*sw.pass(sw.best), sw.median(sw.best));
+            else
+                lblSweep.Text = 'No valid positions (all on land?).';
+            end
+            S.sweep = sw;
+            CTRL.dispMetric.Value = 'Sweep: pass rate (%)';
+            refreshFieldPlot();
+            updateStatus(sprintf('Sweep finished (%d candidates evaluated).', sum(sw.valid)));
+        catch ME
+            uialert(fig, ME.message, 'Sweep error');
+        end
+        setBusy(false);
+    end
 
-        % ---------------- nested local helpers ----------------
-        function setStatusSafe(msg)
-            % Prefer existing updateStatus if available, else write lblStatus directly.
+    function doApplyBestSweep()
+        if isempty(S.sweep) || ~isfinite(S.sweep.best), updateStatus('Run a sweep first.'); return; end
+        CTRL.ox.Value = S.sweep.ox(S.sweep.best);
+        CTRL.oy.Value = S.sweep.oy(S.sweep.best);
+        CTRL.yaw.Value = S.sweep.yaw(S.sweep.best);
+        sw = S.sweep;
+        clearResults();
+        S.sweep = sw;   % keep the sweep visible
+        refreshArrayTab(); refreshEnvPlots(); refreshFieldPlot();
+        updateStatus(sprintf('Array moved to (%.0f, %.0f) m, yaw %.1f deg. Evaluate or optimise there.', CTRL.ox.Value, CTRL.oy.Value, CTRL.yaw.Value));
+    end
+
+    function doExportSweep()
+        if isempty(S.sweep), updateStatus('Run a sweep first.'); return; end
+        [file, pth] = uiputfile({'*.csv','CSV (*.csv)'}, 'Export sweep', 'array_position_sweep.csv');
+        figure(fig);
+        if isequal(file, 0), return; end
+        try
+            sw = S.sweep;
+            fid = fopen(fullfile(pth, file), 'w');
+            fprintf(fid, 'origin_x_m,origin_y_m,yaw_deg,valid,pass_rate,median_err_m,mean_err_m,p95_err_m,detected_frac\n');
+            for q = 1:numel(sw.ox)
+                fprintf(fid, '%.2f,%.2f,%.3f,%d,%.4f,%.3f,%.3f,%.3f,%.4f\n', sw.ox(q), sw.oy(q), sw.yaw(q), sw.valid(q), ...
+                    sw.pass(q), sw.median(q), sw.mean(q), sw.p95(q), sw.det(q));
+            end
+            fclose(fid);
+            updateStatus(sprintf('Sweep saved to %s', file));
+        catch ME
+            uialert(fig, ME.message, 'Export error');
+        end
+    end
+
+%% ====================================================================
+%  Inspect a single source
+%% ====================================================================
+    function doInspect()
+        if isempty(S.M), uialert(fig, 'No hydrophone geometry.', 'Missing geometry'); return; end
+        d = uifigure('Name', 'Inspect a source', 'Position', centreOnParent([900 620]));
+        g = uigridlayout(d, [3 1]);
+        g.RowHeight = {30, '1x', 60};
+        gtop = uigridlayout(g, [1 8]);
+        gtop.Padding = [0 0 0 0];
+        gtop.ColumnWidth = {'fit', 90, 'fit', 90, 'fit', 70, 110, '1x'};
+        uilabel(gtop, 'Text', 'East X (m):');
+        exX = uieditfield(gtop, 'numeric', 'Value', CTRL.fcx.Value + CTRL.R.Value/2);
+        uilabel(gtop, 'Text', 'North Y (m):');
+        exY = uieditfield(gtop, 'numeric', 'Value', CTRL.fcy.Value);
+        uilabel(gtop, 'Text', 'Depth (m):');
+        dList = parseDepths(CTRL.depths.Value);
+        exD = uieditfield(gtop, 'numeric', 'Value', dList(1));
+        uibutton(gtop, 'Text', 'Simulate', 'ButtonPushedFcn', @(~,~)runInspect());
+        axI = uiaxes(g);
+        lbI = uilabel(g, 'Text', '', 'WordWrap', 'on', 'VerticalAlignment', 'top');
+        runInspect();
+
+        function runInspect()
             try
-                if exist('updateStatus','var') == 1
-                    updateStatus(msg);
+                P = readParams();
+                ctx = buildContext(P);
+                Hn = HydrophoneGeometry.toAbsolute(S.M, placement(P), ctx.env);
+                src = [exX.Value exY.Value -abs(exD.Value)];
+                cfg = wahi_geometry_cfg(ctx.cfg, P, ctx.env, Hn, src);
+                loc = WhaleCallLocaliser(cfg, ctx.env, Hn);
+                rng(P.seed, 'twister');
+                sim = loc.simulate(src);
+                cla(axI); hold(axI, 'on'); grid(axI, 'on');
+                [snrAll, rAll] = loc.receivedSNR(src, loc.Htrue);
+                if isempty(sim.signals)
+                    title(axI, sprintf('Not detected: only %d hydrophone(s) above DT', numel(sim.idx)));
+                    lbI.Text = sprintf('Received SNR per hydrophone: %s dB (DT = %.1f dB). Ranges: %s km', ...
+                        mat2str(round(max(snrAll,-99),1)), P.DT, mat2str(round(rAll/1e3,2)));
+                    hold(axI, 'off');
                     return;
                 end
-            catch
-                % fall through
-            end
-            try
-                if exist('lblStatus','var') && isvalid(lblStatus)
-                    lblStatus.Text = msg;
+                sig = sim.signals;
+                tt = (0:size(sig,1)-1)/sim.fs;
+                sc = 0.45/max(abs(sig(:)) + eps);
+                for q = 1:size(sig,2)
+                    plot(axI, tt, q + sc*sig(:,q), 'Color', [0.1 0.3 0.6]);
                 end
-            catch
-                % last resort
-                warning('%s', msg);
-            end
-        end
-
-        function alertSafe(msg, ttl)
-            % Prefer fig if valid, else gcf, else just warn.
-            try
-                if exist('fig','var') && isvalid(fig)
-                    uialert(fig, msg, ttl);
-                    return;
-                end
-            catch
-                % fall through
-            end
-            try
-                uialert(gcf, msg, ttl);
-            catch
-                warning('%s: %s', ttl, msg);
+                yticks(axI, 1:size(sig,2));
+                yticklabels(axI, compose('H%d', sim.idx));
+                xlabel(axI, 'Time relative to first arrival (s)');
+                err = norm(sim.est(1:2) - src(1:2));
+                title(axI, sprintf('Received signals (band-limited, with noise). Horizontal error = %.1f m', err));
+                hold(axI, 'off');
+                lbI.Text = sprintf(['True TDOA (s): %s\nEst. TDOA (s): %s\nSNR (dB): %s | estimate (%.1f, %.1f, %.1f) m ' ...
+                    '| true (%.1f, %.1f, %.1f) m'], mat2str(sim.trueTdoa, 5), mat2str(sim.tdoa, 5), ...
+                    mat2str(round(sim.snr(sim.idx), 1)), sim.est(1), sim.est(2), sim.est(3), src(1), src(2), src(3));
+            catch ME
+                lbI.Text = ['Error: ' ME.message];
             end
         end
     end
 
+    function pos = centreOnParent(sz)
+        p = fig.Position;
+        pos = [round(p(1) + (p(3)-sz(1))/2), round(p(2) + (p(4)-sz(2))/2), sz(1), sz(2)];
+    end
 
-    function M = reconcileMicCount(M, Nnew, Lmax, minD)
-        if isempty(M)
-            M = randomArrayNonCoplanar(Nnew, Lmax, minD);
-            return;
-        end
-
-        Nold = size(M,1);
-        if Nnew == Nold
-            return;
-        elseif Nnew < Nold
-            M = M(1:Nnew,:);
-            % ensure still valid (if not, regenerate)
-            if ~isValidGeometry(M, Lmax, minD)
-                M = randomArrayNonCoplanar(Nnew, Lmax, minD);
+%% ====================================================================
+%  Exports, report, sessions
+%% ====================================================================
+    function doExportResults()
+        if isempty(S.stats), uialert(fig, 'Evaluate the field first.', 'No results'); return; end
+        [file, pth] = uiputfile({'*.csv','CSV (*.csv)'}, 'Export per-source results', ...
+            sprintf('wahi_results_%s.csv', datestr(now, 'yyyymmdd_HHMMSS')));
+        figure(fig);
+        if isequal(file, 0), return; end
+        try
+            st = S.stats; G = S.gridPts;
+            fid = fopen(fullfile(pth, file), 'w');
+            fprintf(fid, 'x_m,y_m,depth_m,flag,used,pass,score_err_m,horiz_err_m,err3d_m,depth_err_m,bearing_err_deg,n_detecting,min_snr_db,max_snr_db,est_x_m,est_y_m,est_depth_m\n');
+            for q = 1:size(G,1)
+                fprintf(fid, '%.2f,%.2f,%.2f,%d,%d,%d,%.3f,%.3f,%.3f,%.3f,%.4f,%d,%.2f,%.2f,%.2f,%.2f,%.2f\n', ...
+                    G(q,1), G(q,2), -G(q,3), st.flag(q), st.usedMask(q), st.passMask(q), st.score_m(q), st.errH_m(q), ...
+                    st.err3_m(q), st.errZ_m(q), st.brg_deg(q), st.nDet(q), st.minSNR(q), st.maxSNR(q), ...
+                    st.est(q,1), st.est(q,2), -st.est(q,3));
             end
-        else
-            % Extend: keep existing, add new random points until valid
-            Madd = randomArrayNonCoplanar(Nnew, Lmax, minD);
-            % Keep your existing mics as much as possible (first Nold)
-            Madd(1:Nold,:) = M;
-            Madd = Madd - mean(Madd,1);
-            if ~isValidGeometry(Madd, Lmax, minD)
-                Madd = randomArrayNonCoplanar(Nnew, Lmax, minD);
-            end
-            M = Madd;
+            fclose(fid);
+            updateStatus(sprintf('Results saved to %s (flag: 1 ok, 2 undetected, 3 TDOA fail, 4 solve fail, 0 skipped)', file));
+        catch ME
+            uialert(fig, ME.message, 'Export error');
         end
     end
 
-    function clearEvaluationResultsOnly()
-        % Clear everything that depends on grid/params, but keep geometry
-        S.gridPts = [];
-        S.lastStats = struct('passRate',0,'meanErr',NaN,'p95Err',NaN,'maxErr',NaN,'threshold_cm',NaN);
-        S.diag = struct();
+    function doExportRun()
+        if isempty(S.H), uialert(fig, 'No run history. Evaluate or optimise first.', 'Nothing to export'); return; end
+        [file, pth] = uiputfile({'*.mat','MAT-files (*.mat)'}, 'Save run as .mat', ...
+            sprintf('wahi_ocean_run__%dhyd__%s.mat', size(S.M,1), datestr(now, 'yyyymmdd_HHMMSS')));
+        figure(fig);
+        if isequal(file, 0), updateStatus('Export cancelled'); return; end
+        try
+            H = S.H; runInfo = S.runInfo; %#ok<NASGU>
+            save(fullfile(pth, file), 'H', 'runInfo', '-v7.3');
+            updateStatus(sprintf('Saved run: %s', file));
+        catch ME
+            uialert(fig, ME.message, 'Export error');
+        end
+    end
 
-        % history becomes inconsistent with new settings
-        S.H = [];
-        S.runInfo = [];
+    function doExportWorkspace()
+        if isdeployed, return; end
+        assignin('base', 'wahi_M', S.M);
+        assignin('base', 'wahi_gridPts', S.gridPts);
+        assignin('base', 'wahi_stats', S.stats);
+        assignin('base', 'wahi_diag', S.diag);
+        assignin('base', 'wahi_H', S.H);
+        try, assignin('base', 'wahi_env', currentEnv(readParams(false))); catch, assignin('base', 'wahi_env', S.env); end
+        assignin('base', 'wahi_call', S.call);
+        assignin('base', 'wahi_sweep', S.sweep);
+        try, assignin('base', 'wahi_P', readParams()); catch, end
+        updateStatus('Exported to workspace: wahi_M, wahi_gridPts, wahi_stats, wahi_diag, wahi_H, wahi_env, wahi_call, wahi_sweep, wahi_P');
+    end
+
+    function doReport()
+        if isempty(S.H) || numel(S.H.iter) < 1
+            uialert(fig, 'No run history. Optimise first.', 'No data'); return;
+        end
+        try
+            f = wahi_ocean_report(S.H);
+            movegui(f, 'center');
+            choice = uiconfirm(fig, 'Save report figure as PNG?', 'Save report?', ...
+                'Options', {'Yes','No'}, 'DefaultOption', 2, 'CancelOption', 2);
+            if strcmp(choice, 'Yes')
+                [file, pth] = uiputfile({'*.png','PNG (*.png)'}, 'Save report', 'wahi_ocean_report.png');
+                if ~isequal(file, 0)
+                    exportgraphics(f, fullfile(pth, file), 'Resolution', 180);
+                    updateStatus(sprintf('Report saved: %s', file));
+                end
+            else
+                updateStatus('Report generated');
+            end
+        catch ME
+            uialert(fig, ME.message, 'Report error');
+        end
+    end
+
+    function doSaveSession()
+        [file, pth] = uiputfile({'*.mat','WAH-i Ocean session (*.mat)'}, 'Save session', ...
+            sprintf('wahi_ocean_session_%s.mat', datestr(now, 'yyyymmdd_HHMMSS')));
+        figure(fig);
+        if isequal(file, 0), return; end
+        try
+            session = struct();
+            session.version = 'WAH-i Ocean 1.0';
+            keys = fieldnames(CTRL);
+            vals = struct();
+            for q = 1:numel(keys), vals.(keys{q}) = CTRL.(keys{q}).Value; end
+            session.values = vals;
+            session.M = S.M;
+            session.bathy = S.env.bathy;
+            session.lat0 = S.env.lat0; session.lon0 = S.env.lon0;
+            session.sspProfile = S.sspProfile;
+            session.ncom = S.ncom;
+            session.callTemplate = S.callTemplate;
+            session.tplLabel = lblTpl.Text;
+            session.sspLabel = lblSSP.Text; %#ok<STRNU>
+            save(fullfile(pth, file), 'session', '-v7.3');
+            updateStatus(sprintf('Session saved: %s', file));
+        catch ME
+            uialert(fig, ME.message, 'Save error');
+        end
+    end
+
+    function doLoadSession()
+        [file, pth] = uigetfile({'*.mat','WAH-i Ocean session (*.mat)'}, 'Load session');
+        figure(fig);
+        if isequal(file, 0), return; end
+        try
+            L = load(fullfile(pth, file));
+            if ~isfield(L, 'session'), error('Not a WAH-i Ocean session file.'); end
+            ss = L.session;
+            keys = fieldnames(ss.values);
+            for q = 1:numel(keys)
+                if isfield(CTRL, keys{q})
+                    try
+                        if strcmp(keys{q}, 'dispLayer'), continue; end
+                        val = ss.values.(keys{q});
+                        if strcmp(keys{q}, 'placeMode'), val = placeLabel(placeCode(val)); end
+                        CTRL.(keys{q}).Value = val;
+                    catch
+                    end
+                end
+            end
+            S.M = ss.M;
+            S.env.bathy = ss.bathy;
+            if ~isempty(S.env.bathy), S.env.bathy = OceanEnvironment.finaliseBathy(S.env.bathy); end
+            S.env.lat0 = ss.lat0; S.env.lon0 = ss.lon0;
+            S.sspProfile = ss.sspProfile;
+            S.ncom = ss.ncom;
+            if ~isempty(S.ncom), S.ncom = OceanEnvironment.rebuildField(S.ncom); end
+            S.callTemplate = ss.callTemplate;
+            if isfield(ss, 'tplLabel'), lblTpl.Text = ss.tplLabel; end
+            if isfield(ss, 'sspLabel'), lblSSP.Text = ss.sspLabel; end
+            setPresetNote();
+            updateBathyInfo();
+            updateCall(true);
+            clearResults(); refreshAll();
+            updateStatus(sprintf('Session loaded: %s', file));
+        catch ME
+            uialert(fig, ME.message, 'Load error');
+        end
     end
 
     function doResetDefaults()
-        choice = uiconfirm(fig, ...
-            'Reset all parameters to default values and clear results/history?', ...
-            'Reset defaults', ...
-            'Options',{'Reset','Cancel'}, ...
-            'DefaultOption',2, 'CancelOption',2);
-
-        if ~strcmp(choice,'Reset')
-            updateStatus('Reset cancelled');
-            return;
-        end
-
-        % --- Set UI controls to defaults ---
-        edSeed.Value      = DEF.rngSeed;
-
-        edLmax.Value      = DEF.Lmax;
-        edN.Value         = DEF.N;
-        edMinPair.Value   = DEF.minPairDist;
-        edMinDistAny.Value= DEF.minDistAny;
-        edR.Value         = DEF.R;
-        edRin.Value       = DEF.Rin;
-        edStep.Value      = DEF.step;
-        edEps.Value       = DEF.epsDist;
-        edBest.Value      = DEF.best_cm;
-        edTol.Value       = DEF.tol_cm;
-        edLambda.Value    = DEF.lambdaMean;
-        edFailPen.Value   = DEF.failPen_cm;
-
-        edMaxIters.Value  = DEF.maxIters;
-        edProbes.Value    = DEF.probes;
-        edInitStep.Value  = DEF.initStep;
-        edMinStep.Value   = DEF.minStep;
-        edStall.Value     = DEF.stall;
-        edShake.Value     = DEF.shake;
-        edEpsJ.Value      = DEF.epsJ;
-        edTargetPass.Value= DEF.targetPass;
-
-        edFs.Value        = DEF.fs;
-        edDur.Value       = DEF.dur_ms;
-        edF0.Value        = DEF.f0;
-        edF1.Value        = DEF.f1;
-        edSNR.Value       = DEF.snr_db;
-        edTail.Value      = DEF.tail_pct;
-        ddCallType.Value  = DEF.callType;
-
-        % Quadrants (checkboxes)
-        cbFrontTopLeft.Value     = DEF.quadrants.frontTopLeft;
-        cbFrontTopRight.Value    = DEF.quadrants.frontTopRight;
-        cbFrontBottomLeft.Value  = DEF.quadrants.frontBottomLeft;
-        cbFrontBottomRight.Value = DEF.quadrants.frontBottomRight;
-        cbBackTopLeft.Value      = DEF.quadrants.backTopLeft;
-        cbBackTopRight.Value     = DEF.quadrants.backTopRight;
-        cbBackBottomLeft.Value   = DEF.quadrants.backBottomLeft;
-        cbBackBottomRight.Value  = DEF.quadrants.backBottomRight;
-
-        % --- Reset state ---
-        S.rngSeed = DEF.rngSeed;
-        rng(S.rngSeed,'twister');
-
-        % Clear evaluation + history
-        resetResults();           % wipes grid/stats/diag + H + runInfo
-        btnReport.Enable    = 'off';
-        btnExportRun.Enable = 'off';
-
-        % Apply geometry-related updates + regenerate default geometry
-        btnApplyAll.Enable = 'off';
-        applyAllChanges();  % will reconcile N/Lmax etc and clear eval again safely
-        doRandomise();      % fresh geometry under default constraints
-
-        updateStatus('Defaults restored');
-    end
-    function [stats, diag] = evaluateFoA_full(loc, gridPts, threshold_cm, minDistToAnyMic, epsDist, failPenalty_cm, c)
-        % Evaluates FoA using your simulate->TDOA->solve pipeline.
-        nP = size(gridPts,1);
-
-        err_cm  = nan(nP,1);
-        ang_deg = nan(nP,1);
-
-        simFail   = 0;
-        tdoaFail  = 0;
-        solveFail = 0;
-        tooClose  = 0;
-
-        mic_pos = loc.mic_positions;
-        fs = loc.param.fs;
-
-        usedMask = false(nP,1);
-
-        for i = 1:nP
-            src = gridPts(i,:);
-            dToMics = vecnorm(mic_pos - src,2,2);
-
-            if min(dToMics) < minDistToAnyMic
-                tooClose = tooClose + 1;
-                continue;
-            end
-            usedMask(i) = true;
-
-            if min(dToMics) < epsDist
-                err_cm(i)  = failPenalty_cm;
-                ang_deg(i) = 180;
-                continue;
-            end
-
+        choice = uiconfirm(fig, 'Reset all settings to defaults? (Loaded bathymetry, profiles and templates are kept.)', ...
+            'Reset defaults', 'Options', {'Reset','Cancel'}, 'DefaultOption', 2, 'CancelOption', 2);
+        if ~strcmp(choice, 'Reset'), return; end
+        keys = fieldnames(DEF);
+        for q = 1:numel(keys)
             try
-                simres = loc.simulate(src);
+                if strcmp(keys{q}, 'dispLayer'), continue; end
+                CTRL.(keys{q}).Value = DEF.(keys{q});
             catch
-                simFail = simFail + 1;
-                continue;
-            end
-
-            try
-                tdoa = estimateTDOA_xcorr(simres.signals, fs);
-                if any(~isfinite(tdoa))
-                    tdoaFail = tdoaFail + 1;
-                    continue;
-                end
-            catch
-                tdoaFail = tdoaFail + 1;
-                continue;
-            end
-
-            try
-                est = localiseTDOA_global(tdoa, mic_pos, c);
-                if any(~isfinite(est))
-                    solveFail = solveFail + 1;
-                    continue;
-                end
-
-                e = norm(est - src) * 100; % m -> cm
-                if ~isfinite(e)
-                    solveFail = solveFail + 1;
-                    continue;
-                end
-                err_cm(i) = e;
-
-                % crude angular error (az/el from mic 1)
-                vT = src - mic_pos(1,:);
-                vE = est - mic_pos(1,:);
-                azT = atan2d(vT(2),vT(1));
-                elT = asind(vT(3)/max(norm(vT),eps));
-                azE = atan2d(vE(2),vE(1));
-                elE = asind(vE(3)/max(norm(vE),eps));
-
-                dAz = mod((azE-azT)+180,360)-180;
-                dEl = elE-elT;
-                ang_deg(i) = hypot(dAz,dEl);
-            catch
-                solveFail = solveFail + 1;
-                continue;
-            end
-
-            if mod(i,25)==0
-                drawnow limitrate;
             end
         end
+        applyPreset(true);
+        S.M = HydrophoneGeometry.pattern(CTRL.patName.Value, patternOpts());
+        onOriginChanged();
+        clearResults(); refreshAll();
+        updateStatus('Defaults restored.');
+    end
 
-        % Fill NaNs on used points with penalty (so pass mask behaves sensibly)
-        err_f = err_cm;
-        err_f(isnan(err_f) & usedMask) = failPenalty_cm;
+    function showTips()
+        txt = sprintf([ ...
+            'Workflow\n' ...
+            '1) Array Design: generate a pattern (dx/dy spacing), then edit cells for uneven layouts. Export CSV to keep it.\n' ...
+            '2) Environment: optionally load bathymetry (GEBCO NetCDF, CSV x/y/z or lon/lat/z, MAT) and a sound-speed\n' ...
+            '   profile or NCOM file. Check the SNR-vs-range plot: sources beyond the detection range will be undetected.\n' ...
+            '3) Calls: pick a species preset or import a template. Keep the sample rate as low as the call allows -\n' ...
+            '   long-range runs scale with call length x sample rate.\n' ...
+            '4) Field & Optimise: evaluate, then optimise. Use "Array position sweep" to find a good deployment site.\n\n' ...
+            'Speed\n' ...
+            '- Each source costs a few ms; the optimiser evaluates the whole field (probes+2) times per iteration.\n' ...
+            '  Optimise on a coarse spacing first, then evaluate the result on a fine grid.\n' ...
+            '- Enable the parallel pool for large grids.\n\n' ...
+            'Interpreting results\n' ...
+            '- Range error grows quickly beyond a few apertures; bearing error stays small. Look at "Bearing error".\n' ...
+            '- Set the localiser sound speed different from the truth model to see the effect of SSP mismatch.\n' ...
+            '- Set the assumed source depth different from the true depth to see depth-mismatch errors in 2-D solves.\n' ...
+            '- Clock error of 1 ms ~ 1.5 m of range difference; at long range this is amplified strongly.\n\n' ...
+            'Refraction / ducting\n' ...
+            '- Environment > Propagation model = Ray tracing: Snell''s-law rays through the profile at the array,\n' ...
+            '  with surface (-1) and bottom (BL dB) reflections. SNR and arrivals then show shadow zones,\n' ...
+            '  convergence zones and multipath. Set "Localiser assumes" = Ray-traced so the solver also\n' ...
+            '  accounts for refraction (otherwise you see the error of a straight-ray localiser).\n\n' ...
+            'Array orientation\n' ...
+            '- Yaw / pitch / roll rotate the designed frame about the array origin (roll -> pitch -> yaw).\n' ...
+            '  The World coordinates table shows where each hydrophone ends up (E, N, height, depth).\n' ...
+            '- The sweep can try several yaw angles at each position.\n\n' ...
+            'Limitations\n' ...
+            '- Ray model is range-independent (one profile and a flat bottom at the array), geometric acoustics\n' ...
+            '  only (no diffraction into shadow zones, no sediment model; incoherent TL).\n' ...
+            '- No source directivity.\n' ...
+            '- Species presets are simple parametric approximations - check against your recordings.\n']);
+        d = uifigure('Name', 'Tips', 'Position', centreOnParent([780 640]));
+        g = uigridlayout(d, [2 1]); g.RowHeight = {'1x', 34};
+        uitextarea(g, 'Value', strsplit(txt, newline), 'Editable', 'off');
+        uibutton(g, 'Text', 'Close', 'ButtonPushedFcn', @(~,~)delete(d));
+    end
 
-        ang_f = ang_deg;
-        ang_f(isnan(ang_f) & usedMask) = 180;
-
-        passMask = (err_f <= threshold_cm) & usedMask;
-        passRate = sum(passMask) / max(1,sum(usedMask));
-
-        usedErrs = err_f(usedMask);
-        meanErr = mean(usedErrs);
-        p95Err  = prctile(usedErrs,95);
-        maxErr  = max(usedErrs);
-
-        stats = struct();
-        stats.err_cm = err_f;
-        stats.ang_deg = ang_f;
-        stats.passMask = passMask;
-        stats.passRate = passRate;
-        stats.meanErr = meanErr;
-        stats.p95Err = p95Err;
-        stats.maxErr = maxErr;
-        stats.threshold_cm = threshold_cm;
-        stats.usedMask = usedMask; % IMPORTANT: report/plotters rely on this
-
-        diag = struct();
-        diag.nP = nP;
-        diag.gridUsed = sum(usedMask);
-        diag.tooClose = tooClose;
-        diag.simFail = simFail;
-        diag.tdoaFail = tdoaFail;
-        diag.solveFail = solveFail;
+    function showAbout()
+        txt = sprintf([ ...
+            'WAH-i Ocean - hydrophone array design & optimisation for whale localisation\n\n' ...
+            'Modified from WAH-i (Widefield Acoustics Heuristic - inverse, iterative)\n' ...
+            'Original author: Ravi Umadi (2026), https://github.com/raviumadi/WAHi-Optimiser\n' ...
+            'Original paper: Umadi (2026) WAH-i: Optimising Microphone Array Geometry for Customised\n' ...
+            'Localisation Accuracy. https://doi.org/10.64898/2026.02.07.704547\n\n' ...
+            'This version replaces the in-air bat-call model with an underwater model: hydrophones,\n' ...
+            'ray tracing (refraction, ducting, multipath), 3-D array orientation,\n' ...
+            'bathymetry, sound-speed profiles (constant / 1-D / NCOM 3-D), sonar-equation SNR,\n' ...
+            'detection thresholds, clock and survey uncertainty, whale call presets and templates,\n' ...
+            'fields of accuracy to 100 km and an array-position sweep.\n\n' ...
+            'Licence: GPLv3. Provided as-is without warranty; validate results for your deployment.\n']);
+        d = uifigure('Name', 'About', 'Position', centreOnParent([700 380]));
+        g = uigridlayout(d, [2 1]); g.RowHeight = {'1x', 34};
+        uitextarea(g, 'Value', strsplit(txt, newline), 'Editable', 'off');
+        uibutton(g, 'Text', 'Close', 'ButtonPushedFcn', @(~,~)delete(d));
     end
 end
 
-%% ===================== REPORT FUNCTION (standalone figure) =====================
-function fig = iwah_make_single_run_report(H, AFTER, METRIC)
-% iWAH single-run report (enhanced)
-% Adds:
-%   - Better global BEFORE vs AFTER distributions (valid-only + catastrophic annotation)
-%   - Accuracy vs radius with median + 10–90% band (for BOTH pos and ang)
-%   - Mic drift plots (dx,dy,dz vs iteration; per mic)
-%   - Mic start/end table (uitable)
-%
-% Inputs:
-%   H     : run history struct (H.meta.P, H.iter)
-%   AFTER : "final" | "best"
-%   METRIC: "pos" | "ang"  (used for the 3D colour tiles; other tiles show both)
+%% ===================== Local (non-nested) helpers =====================
 
-if nargin < 2, AFTER  = "final"; end
-if nargin < 3, METRIC = "pos";   end
-
-P = H.meta.P;
-if ~isfield(P,'threshold_cm')
-    P.threshold_cm = P.best_cm + P.tol_cm;
+function resetAxesModes(ax)
+ax.XLimMode = 'auto'; ax.YLimMode = 'auto'; ax.ZLimMode = 'auto';
+ax.DataAspectRatioMode = 'auto'; ax.PlotBoxAspectRatioMode = 'auto';
+ax.CLimMode = 'auto';
 end
 
-% ---- pick baseline and after ----
-iBase  = 1;
-iFinal = numel(H.iter);
-
-passAll = arrayfun(@(x) x.stats.passRate, H.iter(:))';
-p95All  = arrayfun(@(x) x.stats.p95Err,    H.iter(:))';
-JAll    = arrayfun(@(x) x.J,              H.iter(:))';
-iBest   = maxPassTieBreak(passAll, p95All, JAll);
-
-switch string(AFTER)
-    case "best",  iAfter = iBest;
-    otherwise,    iAfter = iFinal;
+function [Xc, Yc, Dc] = bathyWindow(B, xr, yr)
+% Bathymetry sub-grid covering x/y ranges (world metres) for contouring
+nx = 80; ny = 80;
+xv = linspace(xr(1), xr(2), nx); yv = linspace(yr(1), yr(2), ny);
+[Xc, Yc] = meshgrid(xv, yv);
+Dc = B.F(Yc, Xc);
 end
 
-base = H.iter(iBase);
-aft  = H.iter(iAfter);
-
-% ---- grid ----
-gridPts = base.gridPts;
-if isempty(gridPts)
-    error('Report: base.gridPts is empty. Run WAH/Optimiser with grid logging enabled.');
+function [xd, yd, Dd] = decimateForPlot(B, nmax)
+sx = max(1, ceil(numel(B.x)/nmax)); sy = max(1, ceil(numel(B.y)/nmax));
+xd = B.x(1:sx:end); yd = B.y(1:sy:end);
+Dd = B.depth(1:sy:end, 1:sx:end);
 end
-
-% ---- masks ----
-maskBase = true(size(gridPts,1),1);
-maskAft  = true(size(gridPts,1),1);
-if isfield(base.stats,'usedMask') && ~isempty(base.stats.usedMask), maskBase = base.stats.usedMask(:); end
-if isfield(aft.stats,'usedMask')  && ~isempty(aft.stats.usedMask),  maskAft  = aft.stats.usedMask(:);  end
-
-% ---- metrics ----
-[posBase, ~] = pickMetric(base.stats, "pos");
-[posAft,  ~] = pickMetric(aft.stats,  "pos");
-[angBase, ~] = pickMetric(base.stats, "ang");
-[angAft,  ~] = pickMetric(aft.stats,  "ang");
-
-thr_cm = P.threshold_cm;            % for position thresholding
-thr2   = 4 * thr_cm;                % "valid region" cut-off used in your script
-cmax3d = 2 * thr_cm;                % colour cap for 3D tiles
-
-% ---- pass trajectory extras (accepted / shake) if present ----
-itVals = arrayfun(@(x) x.it, H.iter(:))';
-accepted = false(numel(H.iter),1);
-note = strings(numel(H.iter),1);
-for i = 1:numel(H.iter)
-    if isfield(H.iter(i),'accepted'), accepted(i) = logical(H.iter(i).accepted); end
-    if isfield(H.iter(i),'note') && ~isempty(H.iter(i).note), note(i) = string(H.iter(i).note); end
-end
-isShake = contains(note,"shake/reset");
-
-% ---- drift over iters ----
-[M0, dM, dx, dy, dz] = micDriftXYZ(H); % baseline + per-iter deltas
-
-% ---- table figure (mic start/end) ----
-makeMicStartEndTableFigure(base.M, aft.M, AFTER);
-
-% ---- main figure layout ----
-fig = figure('Name','iWAH Report (enhanced)','Color',[1 1 1], 'Position',[40 40 1760 1040]);
-t = tiledlayout(fig, 3, 4, 'Padding','compact', 'TileSpacing','compact');
-
-% ============================================================
-% (1) 3D BEFORE (chosen METRIC)
-% ============================================================
-ax1 = nexttile(t,1);
-if string(METRIC) == "ang"
-    valsB = angBase; lab = 'Angular error (deg)';
-else
-    valsB = posBase; lab = 'Position error (cm)';
-end
-plot3D(ax1, P, base.M, gridPts, valsB, maskBase, lab, thr_cm, cmax3d);
-title(ax1, sprintf('BEFORE (it=%.1f): pass=%.1f%%, mean=%.2f cm, p95=%.2f cm', ...
-    base.it, 100*base.stats.passRate, base.stats.meanErr, base.stats.p95Err));
-
-% ============================================================
-% (2) 3D AFTER (chosen METRIC)
-% ============================================================
-ax2 = nexttile(t,2);
-if string(METRIC) == "ang"
-    valsA = angAft; lab = 'Angular error (deg)';
-else
-    valsA = posAft; lab = 'Position error (cm)';
-end
-plot3D(ax2, P, aft.M, gridPts, valsA, maskAft, lab, thr_cm, cmax3d);
-title(ax2, sprintf('AFTER (%s, it=%.1f): pass=%.1f%%, mean=%.2f cm, p95=%.2f cm', ...
-    AFTER, aft.it, 100*aft.stats.passRate, aft.stats.meanErr, aft.stats.p95Err));
-
-% ============================================================
-% (3) Pass trajectory
-% ============================================================
-ax3 = nexttile(t,3);
-grid(ax3,'on'); hold(ax3,'on');
-plot(ax3, itVals, 100*passAll, 'LineWidth', 1.5);
-if any(accepted), scatter(ax3, itVals(accepted), 100*passAll(accepted), 40, 'filled'); end
-if any(isShake),  scatter(ax3, itVals(isShake),  100*passAll(isShake),  55, 'd');      end
-xlabel(ax3,'Iteration (it)'); ylabel(ax3,'Pass rate (%)');
-title(ax3,'Pass-rate progression');
-legendItems = {'pass'};
-if any(accepted), legendItems{end+1} = 'accepted'; end %#ok<AGROW>
-if any(isShake),  legendItems{end+1} = 'shake/reset'; end %#ok<AGROW>
-legend(ax3, legendItems, 'Location','best');
-hold(ax3,'off');
-
-% ============================================================
-% (4) Mic geometry: before vs after
-% ============================================================
-ax4 = nexttile(t,4);
-grid(ax4,'on'); axis(ax4,'equal'); hold(ax4,'on'); view(ax4,3);
-xlabel(ax4,'X (m)'); ylabel(ax4,'Y (m)'); zlabel(ax4,'Z (m)');
-title(ax4,'Mic geometry: before (dull) vs after (bright)');
-beforeCol = repmat([0.55 0.55 0.55], size(base.M,1), 1);
-afterCol  = lines(size(aft.M,1));
-scatter3(ax4, base.M(:,1), base.M(:,2), base.M(:,3), 120, beforeCol, 'filled', ...
-    'MarkerEdgeColor',[0.2 0.2 0.2], 'LineWidth',1.2);
-scatter3(ax4, aft.M(:,1),  aft.M(:,2),  aft.M(:,3),  120, afterCol, 'filled', ...
-    'MarkerEdgeColor','k', 'LineWidth',1.4);
-legend(ax4, {'before','after'}, 'Location','best');
-hold(ax4,'off');
-
-% ============================================================
-% (5) Global distribution (POS) — valid region only + catastrophic annotation
-% ============================================================
-ax5 = nexttile(t,5);
-plotGlobalDistributionValidOnly(ax5, posBase(maskBase), posAft(maskAft), thr_cm, 'Position error (cm)');
-
-% ============================================================
-% (6) Global distribution (ANG)
-% ============================================================
-
-ax6 = nexttile(t,6);
-thr_ang = deriveAngularThreshold(angBase(maskBase));
-plotGlobalDistributionValidOnly(ax6, angBase(maskBase), angAft(maskAft), thr_ang, 'Angular error (deg)');
-
-% ============================================================
-% (7) Accuracy vs distance (POS): points + median + 10–90% band
-% ============================================================
-ax7 = nexttile(t,7);
-plotAccuracyVsRadius(ax7, gridPts, maskBase, maskAft, posBase, posAft, ...
-    P, thr_cm, 'Position error (cm)');
-
-% ============================================================
-% (8) Accuracy vs distance (ANG): points + median + 10–90% band
-% ============================================================
-ax8 = nexttile(t,8);
-plotAccuracyVsRadius(ax8, gridPts, maskBase, maskAft, angBase, angAft, ...
-    P, thr_ang, 'Angular error (deg)');
-
-% ============================================================
-% (9)-(11) Mic drift: dx, dy, dz per mic across iteration
-% ============================================================
-ax9  = nexttile(t,9);
-ax10 = nexttile(t,10);
-ax11 = nexttile(t,11);
-plotMicDriftAxes(ax9, ax10, ax11, itVals, dx, dy, dz, accepted, isShake);
-
-% ============================================================
-% (12) Summary text tile
-% ============================================================
-ax12 = nexttile(t,12);
-axis(ax12,'off');
-txt = sprintf([ ...
-    'Run summary\n' ...
-    '-----------\n' ...
-    'N mics: %d\n' ...
-    'Grid used (base/after): %d / %d\n' ...
-    'Pass (base/after): %.1f%% / %.1f%%\n' ...
-    'Pos mean (base/after): %.2f / %.2f cm\n' ...
-    'Pos p95  (base/after): %.2f / %.2f cm\n' ...
-    '\n' ...
-    'Mic drift (after - before)\n' ...
-    '  median |Δx|: %.4f m\n' ...
-    '  median |Δy|: %.4f m\n' ...
-    '  median |Δz|: %.4f m\n'], ...
-    size(base.M,1), ...
-    sum(maskBase), sum(maskAft), ...
-    100*base.stats.passRate, 100*aft.stats.passRate, ...
-    base.stats.meanErr, aft.stats.meanErr, ...
-    base.stats.p95Err,  aft.stats.p95Err, ...
-    median(abs(aft.M(:,1)-base.M(:,1))), ...
-    median(abs(aft.M(:,2)-base.M(:,2))), ...
-    median(abs(aft.M(:,3)-base.M(:,3))) ...
-    );
-text(ax12, 0, 1, txt, 'Units','normalized', 'VerticalAlignment','top', ...
-    'FontName','Consolas', 'FontSize',10);
-
-% Attach useful things for callers
-fig.UserData = struct();
-fig.UserData.base = base;
-fig.UserData.after = aft;
-fig.UserData.P = P;
-fig.UserData.M0 = M0;
-fig.UserData.dM = dM;
-
-end
-
-%% ===================== Plot helpers =====================
-
-function plotGlobalDistributionValidOnly(ax, vB_all, vA_all, thr, xlab)
-% Replicates your "valid region only" overlay + catastrophic annotation
-grid(ax,'on'); hold(ax,'on');
-
-thr2 = 4 * thr;
-
-vB_all = vB_all(isfinite(vB_all));
-vA_all = vA_all(isfinite(vA_all));
-
-vB_valid = vB_all(vB_all <= thr2);
-vA_valid = vA_all(vA_all <= thr2);
-
-nB_cat = sum(vB_all > thr2);
-nA_cat = sum(vA_all > thr2);
-
-fracB_cat = nB_cat / max(1,numel(vB_all));
-fracA_cat = nA_cat / max(1,numel(vA_all));
-
-edges = linspace(0, thr2, 40);
-
-% Before = grey, After = blue (nice “manuscript-like” contrast)
-histogram(ax, vB_valid, edges, 'Normalization','probability', ...
-    'FaceAlpha',0.35,'EdgeAlpha',0.15);
-histogram(ax, vA_valid, edges, 'Normalization','probability', ...
-    'FaceAlpha',0.35,'EdgeAlpha',0.15);
-
-xline(ax, thr,  '--k','threshold');
-xline(ax, thr2, ':k','4×threshold');
-
-xlabel(ax, xlab);
-ylabel(ax, 'Probability');
-title(ax, sprintf('%s (≤ 4×thr = %.2f)', xlab, thr2));
-
-legend(ax, {'before','after','threshold','4×threshold'}, 'Location','best');
-
-txt = sprintf(['Catastrophic failures (>4×thr)\n' ...
-    'before: %.1f%% (%d/%d)\n' ...
-    'after:  %.1f%% (%d/%d)'], ...
-    100*fracB_cat, nB_cat, numel(vB_all), ...
-    100*fracA_cat, nA_cat, numel(vA_all));
-
-text(ax, 0.98, 0.98, txt, 'Units','normalized', ...
-    'HorizontalAlignment','right', 'VerticalAlignment','top', ...
-    'FontSize',9, 'BackgroundColor',[1 1 1 0.85], 'EdgeColor',[0.7 0.7 0.7]);
-
-hold(ax,'off');
-end
-
-function plotAccuracyVsRadius(ax, gridPts, maskBase, maskAft, vBase, vAft, P, thr, ylab)
-hold(ax,'on'); grid(ax,'on');
-
-rBase = vecnorm(gridPts(maskBase,:),2,2);
-rAft  = vecnorm(gridPts(maskAft,:),2,2);
-
-eBase = vBase(maskBase);
-eAft  = vAft(maskAft);
-
-% cap for visibility only (do not hide catastrophes; just clip display)
-eCap = 2 * thr;
-eBaseP = min(eBase, eCap);
-eAftP  = min(eAft,  eCap);
-
-scatter(ax, rBase, eBaseP, 14, [0.6 0.6 0.6], 'filled', 'MarkerFaceAlpha',0.25);
-scatter(ax, rAft,  eAftP,  14, [0.1 0.5 0.9], 'filled', 'MarkerFaceAlpha',0.35);
-
-% distance bins for summary curves
-if isfield(P,'Rin') && isfield(P,'R') && isfinite(P.Rin) && isfinite(P.R) && P.R > P.Rin
-    rbins = linspace(P.Rin, P.R, 10);
-else
-    rr = [rBase(:); rAft(:)];
-    rbins = linspace(min(rr), max(rr), 10);
-end
-
-[rmedB, rloB, rhiB] = radialQuantiles(rBase, eBase, rbins);
-[rmedA, rloA, rhiA] = radialQuantiles(rAft,  eAft,  rbins);
-
-plot(ax, rbins(1:end-1), rmedB, 'k--', 'LineWidth',1.5);
-plot(ax, rbins(1:end-1), rmedA, 'b-',  'LineWidth',2);
-
-fillBand(ax, rbins, rloB, rhiB, [0.4 0.4 0.4], 0.15);
-fillBand(ax, rbins, rloA, rhiA, [0.1 0.5 0.9], 0.20);
-
-yline(ax, thr, '--', 'threshold');
-
-xlabel(ax, 'Distance from array centre (m)');
-ylabel(ax, ylab);
-title(ax, 'Accuracy vs distance from array centre');
-
-legend(ax, {'before (points)','after (points)', ...
-    'before median','after median','before 10–90%','after 10–90%'}, ...
-    'Location','northwest');
-
-hold(ax,'off');
-end
-
-function plotMicDriftAxes(axX, axY, axZ, itVals, dx, dy, dz, accepted, isShake)
-
-plotOne(axX, itVals, dx, accepted, isShake, '\Delta x (m)', 'Mic drift: X');
-plotOne(axY, itVals, dy, accepted, isShake, '\Delta y (m)', 'Mic drift: Y');
-plotOne(axZ, itVals, dz, accepted, isShake, '\Delta z (m)', 'Mic drift: Z');
-
-    function plotOne(ax, itVals, D, accepted, isShake, ylab, ttl)
-        hold(ax,'on'); grid(ax,'on');
-
-        nM = size(D,2);
-
-        % --- mic lines ---
-        hLines = gobjects(nM,1);
-        for m = 1:nM
-            hLines(m) = plot(ax, itVals, D(:,m), 'LineWidth', 1.2);
-        end
-
-        % --- event markers (only if present) ---
-        hAcc = gobjects(1); hShake = gobjects(1);
-        hasAcc = any(accepted);
-        hasShake = any(isShake);
-
-        if hasAcc
-            hAcc = scatter(ax, itVals(accepted), zeros(sum(accepted),1), 18, 'filled');
-        end
-        if hasShake
-            hShake = scatter(ax, itVals(isShake), zeros(sum(isShake),1), 30, 'd');
-        end
-
-        xlabel(ax,'Iteration (it)');
-        ylabel(ax, ylab);
-        title(ax, ttl);
-
-        % --- legend: only include what exists ---
-        h = hLines;
-        labs = arrayfun(@(m) sprintf('M%d', m), 1:nM, 'UniformOutput', false);
-
-        if hasAcc
-            h(end+1) = hAcc; %#ok<AGROW>
-            labs{end+1} = 'accepted';
-        end
-        if hasShake
-            h(end+1) = hShake; %#ok<AGROW>
-            labs{end+1} = 'shake/reset';
-        end
-
-        lgd = legend(ax, h, labs, 'Location','best', 'Interpreter','none');
-        lgd.Color = 'none';        % transparent background
-        lgd.Box   = 'off';         % remove border
-        lgd.TextColor = [0 0 0];   % ensure readability
-        hold(ax,'off');
-    end
-end
-
-function thr_ang = deriveAngularThreshold(angVals)
-% Robust heuristic: define a "threshold-like" scale for angular plots.
-angVals = angVals(isfinite(angVals));
-if isempty(angVals)
-    thr_ang = 5; % fallback
-    return;
-end
-m  = median(angVals);
-p95 = prctile(angVals,95);
-thr_ang = max(1e-3, m + 0.5*(p95 - m));
-end
-
-function makeMicStartEndTableFigure(M0, M1, AFTER)
-% Table with start/end xyz + drifts for fast adoption
-if isempty(M0) || isempty(M1) || size(M0,1) ~= size(M1,1)
-    return;
-end
-N = size(M0,1);
-
-d = M1 - M0;
-dR = vecnorm(d,2,2);
-
-T = table((1:N)', ...
-    M0(:,1), M0(:,2), M0(:,3), ...
-    M1(:,1), M1(:,2), M1(:,3), ...
-    d(:,1),  d(:,2),  d(:,3),  dR, ...
-    'VariableNames', {'Mic','x_start','y_start','z_start','x_end','y_end','z_end','dx','dy','dz','dR'});
-
-fT = figure('Name','Mic start/end table','Color',[1 1 1], 'Position',[120 120 980 320]);
-uit = uitable(fT, 'Data', T{:,:}, 'ColumnName', T.Properties.VariableNames, ...
-    'Units','normalized', 'Position',[0.01 0.01 0.98 0.98]);
-
-titleStr = sprintf('Microphone coordinates: start vs end (%s)', string(AFTER));
-annotation(fT,'textbox',[0.01 0.92 0.98 0.08], ...
-    'String', titleStr, 'EdgeColor','none', 'FontWeight','bold', 'FontSize',12);
-end
-
-%% ===================== Core helper functions  =====================
-
-function [vals, labelStr] = pickMetric(stats, METRIC)
-if string(METRIC) == "ang"
-    vals = stats.ang_deg;
-    labelStr = 'Angular error (deg)';
-else
-    vals = stats.err_cm;
-    labelStr = 'Position error (cm)';
-end
-vals = vals(:);
-end
-
-function idx = maxPassTieBreak(pass, p95, J)
-maxP = max(pass);
-cand = find(pass == maxP);
-if numel(cand) == 1, idx = cand; return; end
-[~,ord] = sort(p95(cand),'ascend');
-cand = cand(ord);
-bestP95 = p95(cand(1));
-cand2 = cand(p95(cand) == bestP95);
-if numel(cand2) == 1, idx = cand2; return; end
-[~,ord2] = sort(J(cand2),'descend');
-idx = cand2(ord2(1));
-end
-
-function plot3D(ax, P, M, gridPts, vals, usedMask, labelStr, thr, cmax)
-cla(ax); hold(ax,'on'); grid(ax,'on'); axis(ax,'equal'); view(ax,3);
-xlabel(ax,'X (m)'); ylabel(ax,'Y (m)'); zlabel(ax,'Z (m)');
-
-[sx,sy,sz] = sphere(30);
-surf(ax, P.Lmax*sx, P.Lmax*sy, P.Lmax*sz, 'FaceAlpha',0.05,'EdgeAlpha',0.12);
-surf(ax, P.R*sx,    P.R*sy,    P.R*sz,    'FaceAlpha',0.03,'EdgeAlpha',0.08);
-plot3(ax,0,0,0,'pentagram','MarkerSize',6,'LineWidth',2,'MarkerFaceColor','r','MarkerEdgeColor','none');
-
-cmap = lines(size(M,1));
-for ii = 1:size(M,1)
-    scatter3(ax, M(ii,1),M(ii,2),M(ii,3), 40, cmap(ii,:), 'filled','MarkerEdgeColor','k','LineWidth',1.5);
-    text(ax, M(ii,1),M(ii,2),M(ii,3), sprintf('  %d',ii), 'FontWeight','bold','FontSize',10,'Color',cmap(ii,:));
-end
-
-pts = gridPts(usedMask,:);
-vv  = vals(usedMask);
-vvCap = min(vv, cmax);
-scatter3(ax, pts(:,1),pts(:,2),pts(:,3), 28, vvCap, 'filled', 'MarkerFaceAlpha',0.75);
-
-colormap(ax, turbo);
-cb = colorbar(ax);
-cb.Label.String = labelStr;
-cb.Label.FontWeight = 'bold';
-clim(ax,[0, cmax]);
-
-text(ax, 0.02, 0.98, sprintf('thr=%.2f | 2×thr=%.2f', thr, cmax), ...
-    'Units','normalized','HorizontalAlignment','left','VerticalAlignment','top', ...
-    'FontWeight','bold','BackgroundColor',[1 1 1 0.6],'Margin',4);
-
-hold(ax,'off');
-end
-
-function [med, qlo, qhi] = radialQuantiles(r, e, rbins)
-n = numel(rbins) - 1;
-med = nan(n,1); qlo = nan(n,1); qhi = nan(n,1);
-for i = 1:n
-    m = r>=rbins(i) & r<rbins(i+1) & isfinite(e);
-    if any(m)
-        med(i) = median(e(m));
-        qlo(i) = prctile(e(m),10);
-        qhi(i) = prctile(e(m),90);
-    end
-end
-end
-
-function fillBand(ax, x, lo, hi, col, alpha)
-x  = x(:); lo = lo(:); hi = hi(:);
-if numel(x) == numel(lo)+1
-    x = (x(1:end-1) + x(2:end))/2;
-end
-ok = isfinite(x) & isfinite(lo) & isfinite(hi);
-x = x(ok); lo = lo(ok); hi = hi(ok);
-if numel(x) < 2, return; end
-fill(ax, [x; flipud(x)], [lo; flipud(hi)], col, 'FaceAlpha', alpha, 'EdgeColor','none');
-end
-
-function [M0, dM, dx, dy, dz] = micDriftXYZ(H)
-% Returns baseline mic positions, per-iteration mic deltas, and dx/dy/dz matrices.
-nI = numel(H.iter);
-M0 = H.iter(1).M;
-nM = size(M0,1);
-dM = zeros(nI, nM, 3);
-
-for i = 1:nI
-    Mi = H.iter(i).M;
-    if isempty(Mi) || size(Mi,1) ~= nM
-        continue;
-    end
-    Di = Mi - M0;
-    dM(i,:,:) = reshape(Di, [1 nM 3]);
-end
-
-dx = squeeze(dM(:,:,1));
-dy = squeeze(dM(:,:,2));
-dz = squeeze(dM(:,:,3));
-end
-
-function cb = mkCB(parent,r,c,txt,val)
-cb = uicheckbox(parent,'Text',txt,'Value',val);
-cb.Layout.Row = r; cb.Layout.Column = c;
-end
-
-function dirs = ruleSet2Dirs()
-dirs = [
-    1 0 0; -1 0 0;
-    0 1 0;  0 -1 0;
-    0 0 1;  0 0 -1;
-    1 1 0;  1 -1 0; -1 1 0; -1 -1 0;
-    1 0 1;  1 0 -1;
-    0 1 1;  0 1 -1
-    ];
-dirs = dirs ./ vecnorm(dirs,2,2);
-end
-
-
-function M = randomArrayNonCoplanar(N, Lmax, minPairDist)
-for t = 1:5000
-    M = randn(N,3);
-    M = M ./ vecnorm(M,2,2);
-    radii = (0.25 + 0.75*rand(N,1)) * Lmax;
-    M = M .* radii;
-    M = M - mean(M,1);
-    if isValidGeometry(M, Lmax, minPairDist)
-        return;
-    end
-end
-error('Could not generate a valid non-coplanar geometry (try loosening constraints).');
-end
-
-function ok = isValidGeometry(M, Lmax, minPairDist)
-ok = true;
-Mc = M - mean(M,1);
-
-% within arm limit
-r = vecnorm(Mc,2,2);
-if any(r > Lmax*(1+1e-9))
-    ok = false;
-    return;
-end
-
-% min pairwise spacing
-if minPairDist > 0
-    D = squareform(pdist(Mc));
-    D(D==0) = inf;
-    if any(D(:) < minPairDist)
-        ok = false;
-        return;
-    end
-end
-
-% non-coplanar
-if rank(Mc,1e-6) < 3
-    ok = false;
-    return;
-end
-end
-
-function gridPts = buildShellGrid(R, Rin, step, quadrants)
-% Generate 3D grid within spherical shell, then apply quadrant filtering.
-ax = -R:step:R;
-[X,Y,Z] = ndgrid(ax,ax,ax);
-pts = [X(:) Y(:) Z(:)];
-r = vecnorm(pts,2,2);
-
-% Shell constraint
-shellMask = (r <= R) & (r >= Rin);
-pts = pts(shellMask,:);
-
-if nargin < 4 || isempty(quadrants)
-    gridPts = pts;
-    return;
-end
-
-% Quadrants:
-% Front: X > 0, Back: X < 0
-% Right: Y > 0, Left: Y < 0
-% Top: Z > 0, Bottom: Z < 0
-quadMask = false(size(pts,1),1);
-
-if quadrants.frontTopLeft
-    quadMask = quadMask | (pts(:,1) > 0 & pts(:,2) < 0 & pts(:,3) > 0);
-end
-if quadrants.frontTopRight
-    quadMask = quadMask | (pts(:,1) > 0 & pts(:,2) > 0 & pts(:,3) > 0);
-end
-if quadrants.frontBottomLeft
-    quadMask = quadMask | (pts(:,1) > 0 & pts(:,2) < 0 & pts(:,3) < 0);
-end
-if quadrants.frontBottomRight
-    quadMask = quadMask | (pts(:,1) > 0 & pts(:,2) > 0 & pts(:,3) < 0);
-end
-if quadrants.backTopLeft
-    quadMask = quadMask | (pts(:,1) < 0 & pts(:,2) < 0 & pts(:,3) > 0);
-end
-if quadrants.backTopRight
-    quadMask = quadMask | (pts(:,1) < 0 & pts(:,2) > 0 & pts(:,3) > 0);
-end
-if quadrants.backBottomLeft
-    quadMask = quadMask | (pts(:,1) < 0 & pts(:,2) < 0 & pts(:,3) < 0);
-end
-if quadrants.backBottomRight
-    quadMask = quadMask | (pts(:,1) < 0 & pts(:,2) > 0 & pts(:,3) < 0);
-end
-
-gridPts = pts(quadMask,:);
-end
-
-function Mout = shakeGeometry(M, sigma, Lmax, minPairDist)
-Mout = M + sigma*randn(size(M));
-Mout = Mout - mean(Mout,1);
-
-r = vecnorm(Mout,2,2);
-mask = r > Lmax;
-Mout(mask,:) = Mout(mask,:) .* (Lmax ./ r(mask)) * 0.999;
-
-if ~isValidGeometry(Mout, Lmax, minPairDist)
-    Mout = M;
-end
-end
-
-
-function J = scoreJ(stats, lambdaMean, failPenalty_cm)
-meanNorm = min(stats.meanErr / failPenalty_cm, 1);
-J = stats.passRate - lambdaMean * meanNorm;
-end
-
-function tdoa = estimateTDOA_xcorr(signals, fs)
-% signals: [Nsamp x Nmics]
-num_mics = size(signals,2);
-tdoa = zeros(num_mics-1,1);
-ref = signals(:,1);
-for i = 2:num_mics
-    [c,lags] = xcorr(signals(:,i), ref, 'coeff');
-    [~,idx] = max(abs(c));
-    tdoa(i-1) = lags(idx)/fs;
-end
-end
-

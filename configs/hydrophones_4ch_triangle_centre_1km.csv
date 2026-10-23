@@ -1,0 +1,11 @@
+# WAH-i Ocean hydrophone geometry
+# origin_x_m=0.000
+# origin_y_m=0.000
+# placement_mode=seafloor
+# reference_depth_m=500.000
+# z_rel_m = height above seafloor (seafloor mode) or offset from reference depth (fixed mode)
+id,x_rel_m,y_rel_m,z_rel_m,x_abs_m,y_abs_m,depth_m,lat,lon
+1,0.0000,0.0000,5.0000,0.000,0.000,995.000,NaN,NaN
+2,0.0000,1000.0000,5.0000,0.000,1000.000,995.000,NaN,NaN
+3,-866.0254,-500.0000,5.0000,-866.025,-500.000,995.000,NaN,NaN
+4,866.0254,-500.0000,5.0000,866.025,-500.000,995.000,NaN,NaN
